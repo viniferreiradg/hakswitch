@@ -1,0 +1,104 @@
+@import 'tailwindcss';
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+@import './base.css';
+
+@theme {
+  --font-sans:
+    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  --color-bg: #0b0d14;
+  --color-sidebar: #11141d;
+  --color-card: #171b25;
+  --color-input: #1c202c;
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-text-primary: #f3f4f8;
+  --color-text-secondary: #a0a7b8;
+  --color-placeholder: #6e7482;
+
+  --color-accent: #5b5ceb;
+  --color-accent-hover: #6a6af5;
+  --color-accent-pressed: #4748c7;
+
+  --radius-input: 12px;
+  --radius-button: 12px;
+  --radius-card: 16px;
+  --radius-table: 14px;
+  --radius-sidebar: 20px;
+  --radius-drop: 18px;
+
+  --shadow-soft: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+
+body {
+  overflow: hidden;
+  user-select: none;
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+}
+
+#root {
+  height: 100vh;
+}
+
+/* Componentes reutilizáveis do redesign - usados em App.tsx e nos
+ * modais (SettingsPanel, PlatformArtList, BuildSuccessModal). */
+.field-input {
+  height: 44px;
+  border-radius: var(--radius-input);
+  background: var(--color-input);
+  border: 1px solid var(--color-border);
+  padding: 0 12px;
+  font-size: 14px;
+  color: var(--color-text-primary);
+}
+
+.field-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.btn-primary,
+.btn-secondary {
+  height: 44px;
+  border-radius: var(--radius-button);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 0 24px;
+  white-space: nowrap;
+}
+
+.btn-primary {
+  background: var(--color-accent);
+  color: white;
+  border: none;
+}
+
+.btn-primary:hover {
+  background: var(--color-accent-hover);
+}
+
+.btn-primary:active {
+  background: var(--color-accent-pressed);
+}
+
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* Botão P - mesma cor/comportamento de .btn-primary/.btn-secondary, só
+ * com padding e texto 4px menores. Combina com uma das duas: className
+ * "btn-primary btn-sm" ou "btn-secondary btn-sm". */
+.btn-sm {
+  padding: 0 20px;
+  font-size: 10px;
+}

@@ -1,0 +1,39 @@
+# --- retroarch (fork em C) ---
+retroarch/build/
+retroarch/build_switch/
+retroarch/dist/
+retroarch/*.nro
+retroarch/*.nacp
+retroarch/*.elf
+retroarch/*.pfs0
+# pasta de teste local (PC) - roms/capas/musica reais, mesmo motivo do
+# template/local-data/: nunca versionar. hakswitch_init_paths() em
+# menu_displaylist.c usa essa pasta como base quando roda no PC (fora do
+# Switch).
+retroarch/hakswitch/
+retroarch/hakswitch_test_images/
+
+# --- studio (Electron/TS) ---
+studio/node_modules/
+studio/out/
+studio/dist/
+studio/.vite/
+studio/*.tsbuildinfo
+studio/cores/
+
+# --- template: conteudo local do pacote entregavel, nunca versionado
+# (ROMs, capas, screenshots, cores .nro compilados, musica/sfx de terceiros,
+# o .nro final) - fica so no disco, documentado em template/README.md ---
+template/local-data/
+
+# --- segredos: nunca devem chegar nem perto do git ---
+prod.keys
+*.keys
+*.nsp
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+*.log
+.claude/

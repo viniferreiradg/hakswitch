@@ -1,0 +1,23 @@
+/* @import "tailwindcss" e o @theme customizado vivem em main.css (o
+ * entry real do app) - dentro deste arquivo, importado por main.css,
+ * o @theme não estava sendo lido pelo plugin do Vite (confirmado lendo
+ * o CSS compilado: nenhum token novo aparecia). */
+
+/* Scrollbar discreta - sem setas, 8px, some quando não em hover. */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+ul {
+  list-style: none;
+}
