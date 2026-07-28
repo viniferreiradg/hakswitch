@@ -1,5 +1,13 @@
 # HakSwitch
 
+> Por que este projeto mora em `C:\Users\Vini\dev\hakswitch\` e não em
+> `Documents\01 claude\hakswitch` (convenção usada nos outros projetos): o
+> `switch_rules` do devkitPro (`C:\devkitPro\libnx\switch_rules`) usa caminhos sem
+> aspas em vários pontos (ex: `-I$(CURDIR)/$(BUILD)`), o que quebra se o caminho
+> tiver espaço - e "01 claude" tem espaço. Foi exatamente esse tipo de problema que
+> gerou a duplicação `retroarch-src`/`rasrc` que existia antes desta reorganização.
+> Não mover pra `01 claude` sem resolver isso primeiro.
+
 Frontend customizado pra Nintendo Switch homebrew que transforma o RetroArch num
 launcher estilo "console" - carrossel por console, capas, metadados, sem menu padrão
 do RetroArch aparecendo pro usuário final.
