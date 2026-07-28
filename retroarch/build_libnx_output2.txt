@@ -1,7 +1,0 @@
-Detected MSYS2 environment
-Makefile.common:2992: Windows NT version macro (_WIN32_WINNT) is not defined.
-linking retroarch_switch.elf
-built ... retroarch_switch.nro
-built ... retroarch_switch.nso
-built ... retroarch_switch.pfs0
-MAKE_EXIT=0

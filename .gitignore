@@ -37,3 +37,5 @@ Thumbs.db
 .vscode/
 *.log
 .claude/
+retroarch/build_libnx_output*.txt
+retroarch/build_libnx_verify.log
