@@ -46,6 +46,9 @@
 #include "../../gfx/gfx_display.h"
 #include "../../gfx/gfx_thumbnail.h"
 #include "../../tasks/tasks_internal.h"
+#include "../../command.h"
+#include "../../retroarch.h"
+#include "../../verbosity.h"
 
 #include "../../config.def.h"
 #include "../../configuration.h"
@@ -5964,6 +5967,13 @@ typedef struct
 static hakswitch_console_asset_t hakswitch_console_assets[8];
 static int hakswitch_console_asset_count = 0;
 
+/* Forward declaration - hakswitch_queue_upload is defined further down
+ * with the game cover/screenshot upload machinery it was originally
+ * built for, but the console logo/background callbacks just below need
+ * it too (see the comment on those callbacks for why). */
+static void hakswitch_queue_upload(struct texture_image *img,
+      uintptr_t *tex_out, unsigned *w_out, unsigned *h_out);
+
 /* HAKSWITCH TEST: async upload callbacks for console logo/background art
  * - same reasoning as hakswitch_game_cover_upload_cb/
  * hakswitch_game_screenshot_upload_cb further down: task_push_image_load
@@ -5973,7 +5983,20 @@ static int hakswitch_console_asset_count = 0;
  * after "Close Content" restarts the process on Switch, which empties
  * this cache and makes every visible console's logo+background a fresh
  * decode all at once. hakswitch_console_assets is a fixed-size static
- * array, so the slot pointer stays valid for the process's lifetime. */
+ * array, so the slot pointer stays valid for the process's lifetime.
+ *
+ * These two callbacks used to call video_driver_texture_load() directly
+ * despite the comment above already describing the async plan - that
+ * direct call is the exact same blocking GPU upload that was root-caused
+ * (via a diagnostic build) as the cause of the cover-art freezes, just
+ * never migrated over here when hakswitch_queue_upload/
+ * hakswitch_process_pending_uploads were built to fix that for covers.
+ * Confirmed as the remaining stutter source 2026-07-29: shrinking cover
+ * art didn't help because covers were already on the async path - this
+ * one wasn't. Routed through the same one-in-flight-per-frame queue now,
+ * so up to 5 consoles' worth of logo+background art (visible carousel
+ * window) spreads the upload cost across frames instead of blocking
+ * whichever one they all decode on. */
 static void hakswitch_console_logo_upload_cb(retro_task_t *task,
       void *task_data, void *user_data, const char *err)
 {
@@ -5981,11 +6004,7 @@ static void hakswitch_console_logo_upload_cb(retro_task_t *task,
    hakswitch_console_asset_t *slot = (hakswitch_console_asset_t*)user_data;
 
    if (slot && img && img->width > 0 && img->height > 0)
-   {
-      video_driver_texture_load(img, TEXTURE_FILTER_MIPMAP_LINEAR, &slot->logo_tex);
-      slot->logo_w = img->width;
-      slot->logo_h = img->height;
-   }
+      hakswitch_queue_upload(img, &slot->logo_tex, &slot->logo_w, &slot->logo_h);
 }
 
 static void hakswitch_console_bg_upload_cb(retro_task_t *task,
@@ -5995,11 +6014,7 @@ static void hakswitch_console_bg_upload_cb(retro_task_t *task,
    hakswitch_console_asset_t *slot = (hakswitch_console_asset_t*)user_data;
 
    if (slot && img && img->width > 0 && img->height > 0)
-   {
-      video_driver_texture_load(img, TEXTURE_FILTER_MIPMAP_LINEAR, &slot->bg_tex);
-      slot->bg_w = img->width;
-      slot->bg_h = img->height;
-   }
+      hakswitch_queue_upload(img, &slot->bg_tex, &slot->bg_w, &slot->bg_h);
 }
 
 static hakswitch_console_asset_t *hakswitch_get_console_assets(const char *console_name)
@@ -6189,6 +6204,7 @@ typedef struct
 static hakswitch_game_asset_t hakswitch_game_assets[64];
 static int hakswitch_game_asset_count = 0;
 
+
 /* HAKSWITCH TEST: async upload callbacks for cover/screenshot art.
  * task_push_image_load() (used below in hakswitch_get_game_cover)
  * decodes the PNG/JPEG on a background task thread instead of right
@@ -6203,6 +6219,71 @@ static int hakswitch_game_asset_count = 0;
  * cheap. hakswitch_game_assets is a fixed-size static array, so the
  * slot pointer passed as user_data stays valid for the process's whole
  * lifetime - no risk of the callback firing after its slot is gone. */
+/* HAKSWITCH TEST: root-caused on real hardware - video_driver_texture_
+ * load() blocks the calling thread for the whole GPU upload (confirmed
+ * by isolating it from decode/file-discovery/task overhead, all of
+ * which already run off the main thread and don't stutter the BGM on
+ * their own). Also confirmed via gfx/video_thread_wrapper.c that
+ * RetroArch's own "threaded video" - on by default for libnx - doesn't
+ * actually defer texture loads to the video thread despite the name;
+ * thread_load_texture() there just calls straight through on whatever
+ * thread called it. video_driver_texture_load_async() (gfx/video_
+ * driver.c) is the real fix: it hands the upload to the video thread's
+ * own loop instead (see hakswitch_async_load in video_thread_wrapper.h)
+ * and returns immediately, so the calling thread's audio timing is
+ * never affected by how long the GPU upload actually takes. This queue
+ * just holds requests until that single-in-flight async slot frees up -
+ * sized for the worst case (every hakswitch_game_assets slot with both
+ * a cover and a screenshot pending at once) so it can never overflow
+ * for any real library size. */
+#define HAKSWITCH_PENDING_UPLOAD_MAX 128
+
+typedef struct
+{
+   struct texture_image *img;
+   uintptr_t *tex_out;
+   unsigned *w_out;
+   unsigned *h_out;
+} hakswitch_pending_upload_t;
+
+static hakswitch_pending_upload_t hakswitch_pending_uploads[HAKSWITCH_PENDING_UPLOAD_MAX];
+static int hakswitch_pending_upload_count = 0;
+
+static void hakswitch_queue_upload(struct texture_image *img,
+      uintptr_t *tex_out, unsigned *w_out, unsigned *h_out)
+{
+   if (hakswitch_pending_upload_count >= HAKSWITCH_PENDING_UPLOAD_MAX)
+      return; /* shouldn't happen at this size - drop rather than overrun */
+
+   hakswitch_pending_uploads[hakswitch_pending_upload_count].img     = img;
+   hakswitch_pending_uploads[hakswitch_pending_upload_count].tex_out = tex_out;
+   hakswitch_pending_uploads[hakswitch_pending_upload_count].w_out   = w_out;
+   hakswitch_pending_uploads[hakswitch_pending_upload_count].h_out   = h_out;
+   hakswitch_pending_upload_count++;
+}
+
+/* Called once per frame from ozone_frame(). Hands at most one pending
+ * upload to the video thread per call - video_driver_texture_load_
+ * async() itself refuses (returns false) while a previous request is
+ * still in flight, so this naturally paces itself to however fast the
+ * video thread actually drains them, no manual throttling needed. */
+static void hakswitch_process_pending_uploads(void)
+{
+   hakswitch_pending_upload_t *u;
+
+   if (hakswitch_pending_upload_count == 0)
+      return;
+
+   u = &hakswitch_pending_uploads[0];
+   if (!video_driver_texture_load_async(u->img, TEXTURE_FILTER_MIPMAP_LINEAR,
+         u->tex_out, u->w_out, u->h_out))
+      return; /* video thread still busy with the previous one */
+
+   hakswitch_pending_upload_count--;
+   memmove(&hakswitch_pending_uploads[0], &hakswitch_pending_uploads[1],
+         hakswitch_pending_upload_count * sizeof(hakswitch_pending_upload_t));
+}
+
 static void hakswitch_game_cover_upload_cb(retro_task_t *task,
       void *task_data, void *user_data, const char *err)
 {
@@ -6210,11 +6291,7 @@ static void hakswitch_game_cover_upload_cb(retro_task_t *task,
    hakswitch_game_asset_t *slot = (hakswitch_game_asset_t*)user_data;
 
    if (slot && img && img->width > 0 && img->height > 0)
-   {
-      video_driver_texture_load(img, TEXTURE_FILTER_MIPMAP_LINEAR, &slot->cover_tex);
-      slot->cover_w = img->width;
-      slot->cover_h = img->height;
-   }
+      hakswitch_queue_upload(img, &slot->cover_tex, &slot->cover_w, &slot->cover_h);
 }
 
 static void hakswitch_game_screenshot_upload_cb(retro_task_t *task,
@@ -6224,11 +6301,7 @@ static void hakswitch_game_screenshot_upload_cb(retro_task_t *task,
    hakswitch_game_asset_t *slot = (hakswitch_game_asset_t*)user_data;
 
    if (slot && img && img->width > 0 && img->height > 0)
-   {
-      video_driver_texture_load(img, TEXTURE_FILTER_MIPMAP_LINEAR, &slot->screenshot_tex);
-      slot->screenshot_w = img->width;
-      slot->screenshot_h = img->height;
-   }
+      hakswitch_queue_upload(img, &slot->screenshot_tex, &slot->screenshot_w, &slot->screenshot_h);
 }
 
 /* Tiny ad-hoc extractor for our fixed, flat {"description":"...",
@@ -6265,6 +6338,221 @@ static void hakswitch_json_extract_string(const char *json,
    out[len] = '\0';
 }
 
+/* HAKSWITCH TEST: params owned by the task (freed in the cleanup below),
+ * copied from the caller's stack buffers since those don't survive past
+ * hakswitch_get_game_cover() returning. "slot" is a pointer into the
+ * fixed hakswitch_game_assets[64] array - never reallocated, so it stays
+ * valid for the process lifetime and is safe to carry across threads. */
+typedef struct
+{
+   char roms_dir[1024];
+   char rom_filename[512];
+   hakswitch_game_asset_t *slot;
+} hakswitch_discover_params_t;
+
+/* Result owned by the task until the callback below consumes it (freed
+ * in cleanup) - the handler below only ever writes into this, never
+ * into "slot" directly, so no locking is needed between the background
+ * handler and the main-thread callback/cleanup. */
+typedef struct
+{
+   hakswitch_game_asset_t *slot;
+   char cover_path[1200];
+   char screenshot_path[1200];
+   bool has_cover;
+   bool has_screenshot;
+   char name[256];
+   char description[512];
+   char year[16];
+   char region[64];
+} hakswitch_discover_result_t;
+
+/* HAKSWITCH TEST: runs on the task-queue worker thread (see
+ * threaded_worker() in libretro-common/queues/task_queue.c) - moved off
+ * the main thread because this used to run synchronously from the
+ * carousel draw loop. filestream_exists() + fopen/fread against a real
+ * SD card can each take tens of ms; with several newly-visible slots
+ * probing up to 6 extensions plus a metadata read in a row while
+ * scrolling fast, that stacked up on the main thread for long enough to
+ * starve the audio FIFO between refills (see the fifo_new() comment in
+ * audio/drivers/switch_libnx_audren_thread_audio.c for the other half
+ * of this fix) - audible as the carousel music stuttering while
+ * scrolling. */
+static void hakswitch_discover_handler(retro_task_t *task)
+{
+   hakswitch_discover_params_t *params = (hakswitch_discover_params_t*)task->state;
+   hakswitch_discover_result_t *result;
+   char console_dir[1024];
+   char rom_name_noext[512];
+   static const char *hakswitch_art_exts[] = { "png", "jpg", "jpeg", "webp" };
+   size_t ei;
+   /* HAKSWITCH TEST: real timing (Phase 1 profiling) - how long the file
+    * discovery (stat probes + metadata json read) actually takes on
+    * real hardware, per rom. Written to sdmc:/retroarch-log.txt (needs
+    * HAVE_FILE_LOGGER, enabled in Makefile.libnx). Runs on the task
+    * worker thread already, so this doesn't affect audio timing itself -
+    * it's here purely to get real ms numbers instead of guessing. */
+   retro_time_t hakswitch_t0 = cpu_features_get_time_usec();
+
+   if (!params)
+   {
+      task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
+      return;
+   }
+
+   result = (hakswitch_discover_result_t*)calloc(1, sizeof(*result));
+   if (!result)
+   {
+      task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
+      return;
+   }
+   result->slot = params->slot;
+
+   /* roms_dir is ".../<ConsoleName>/roms" - its sibling "capas"/
+    * "screenshots"/"metadata" folders are where assets for every game
+    * in it live. */
+   fill_pathname_parent_dir(console_dir, params->roms_dir, sizeof(console_dir));
+   {
+      size_t clen = strlen(console_dir);
+      if (clen > 0 && (console_dir[clen - 1] == '/' || console_dir[clen - 1] == '\\'))
+         console_dir[clen - 1] = '\0';
+   }
+
+   strlcpy(rom_name_noext, params->rom_filename, sizeof(rom_name_noext));
+   path_remove_extension(rom_name_noext);
+
+   {
+      char capas_dir[1024];
+
+      fill_pathname_join_special(capas_dir, console_dir, "capas", sizeof(capas_dir));
+
+      for (ei = 0; ei < sizeof(hakswitch_art_exts) / sizeof(hakswitch_art_exts[0]); ei++)
+      {
+         char cover_path[1200];
+
+         fill_pathname_join_special(cover_path, capas_dir, rom_name_noext, sizeof(cover_path));
+         strlcat(cover_path, ".", sizeof(cover_path));
+         strlcat(cover_path, hakswitch_art_exts[ei], sizeof(cover_path));
+
+         if (filestream_exists(cover_path))
+         {
+            strlcpy(result->cover_path, cover_path, sizeof(result->cover_path));
+            result->has_cover = true;
+            break;
+         }
+      }
+   }
+
+   {
+      char screenshots_dir[1024];
+
+      fill_pathname_join_special(screenshots_dir, console_dir, "screenshots", sizeof(screenshots_dir));
+
+      for (ei = 0; ei < sizeof(hakswitch_art_exts) / sizeof(hakswitch_art_exts[0]); ei++)
+      {
+         char shot_path[1200];
+
+         fill_pathname_join_special(shot_path, screenshots_dir, rom_name_noext, sizeof(shot_path));
+         strlcat(shot_path, ".", sizeof(shot_path));
+         strlcat(shot_path, hakswitch_art_exts[ei], sizeof(shot_path));
+
+         if (filestream_exists(shot_path))
+         {
+            strlcpy(result->screenshot_path, shot_path, sizeof(result->screenshot_path));
+            result->has_screenshot = true;
+            break;
+         }
+      }
+   }
+
+   /* Metadata json - same basename-match convention. Uses plain C
+    * stdio instead of RetroArch's filestream_read_file, which was
+    * mysteriously only reading 1 byte of this file regardless of its
+    * real size. */
+   {
+      char metadata_dir[1024];
+      char json_path[1200];
+      FILE *f;
+
+      fill_pathname_join_special(metadata_dir, console_dir, "metadata", sizeof(metadata_dir));
+      fill_pathname_join_special(json_path, metadata_dir, rom_name_noext, sizeof(json_path));
+      strlcat(json_path, ".json", sizeof(json_path));
+
+      if ((f = fopen(json_path, "rb")))
+      {
+         long file_size;
+         fseek(f, 0, SEEK_END);
+         file_size = ftell(f);
+         fseek(f, 0, SEEK_SET);
+
+         if (file_size > 0)
+         {
+            char *json_str = (char*)malloc((size_t)file_size + 1);
+            if (json_str)
+            {
+               size_t n = fread(json_str, 1, (size_t)file_size, f);
+               json_str[n] = '\0';
+
+               hakswitch_json_extract_string(json_str, "name", result->name, sizeof(result->name));
+               hakswitch_json_extract_string(json_str, "description", result->description, sizeof(result->description));
+               hakswitch_json_extract_string(json_str, "year", result->year, sizeof(result->year));
+               hakswitch_json_extract_string(json_str, "region", result->region, sizeof(result->region));
+
+               free(json_str);
+            }
+         }
+         fclose(f);
+      }
+   }
+
+   hakswitch_debug_log("[HAKSWITCH_PROFILE] discover %s: %.2f ms (cover=%d shot=%d)\n",
+         params->rom_filename,
+         (cpu_features_get_time_usec() - hakswitch_t0) / 1000.0,
+         result->has_cover, result->has_screenshot);
+
+   task_set_data(task, result);
+   task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
+}
+
+/* Runs on the main thread (task_queue_check(), called once per frame
+ * from the run loop) once hakswitch_discover_handler above finishes -
+ * same thread/timing hakswitch_game_cover_upload_cb already runs on,
+ * so writing into "slot" here is safe. The actual image decode is left
+ * as its own task (task_push_image_load), unchanged from before. */
+static void hakswitch_discover_cb(retro_task_t *task,
+      void *task_data, void *user_data, const char *error)
+{
+   hakswitch_discover_result_t *result = (hakswitch_discover_result_t*)task_data;
+
+   if (!result || !result->slot)
+      return;
+
+   strlcpy(result->slot->name, result->name, sizeof(result->slot->name));
+   strlcpy(result->slot->description, result->description, sizeof(result->slot->description));
+   strlcpy(result->slot->year, result->year, sizeof(result->slot->year));
+   strlcpy(result->slot->region, result->region, sizeof(result->slot->region));
+
+#if !defined(HAKSWITCH_DIAG_NO_IMAGES)
+   if (result->has_cover)
+      task_push_image_load(result->cover_path,
+            (video_driver_get_disp_flags() & VIDEO_FLAG_USE_RGBA), 0, 0,
+            hakswitch_game_cover_upload_cb, result->slot);
+
+   if (result->has_screenshot)
+      task_push_image_load(result->screenshot_path,
+            (video_driver_get_disp_flags() & VIDEO_FLAG_USE_RGBA), 0, 0,
+            hakswitch_game_screenshot_upload_cb, result->slot);
+#endif
+}
+
+static void hakswitch_discover_cleanup(retro_task_t *task)
+{
+   if (task->state)
+      free(task->state);
+   if (task->task_data)
+      free(task->task_data);
+}
+
 static hakswitch_game_asset_t *hakswitch_get_game_cover(
       const char *roms_dir, const char *rom_filename)
 {
@@ -6295,124 +6583,36 @@ static hakswitch_game_asset_t *hakswitch_get_game_cover(
       slot->tried = false;
    }
 
+#if !defined(HAKSWITCH_DIAG_NO_IMAGES)
    if (slot && !slot->tried)
    {
-      char console_dir[1024];
-      char capas_dir[1024];
-      char rom_name_noext[512];
-      /* Direct probe by extension instead of dir_list_new-ing the whole
-       * "capas"/"screenshots" folder and comparing basenames against
-       * every file in it: that scan is O(files in the folder) and runs
-       * once per newly-visible carousel slot, so with a big library
-       * (hundreds/thousands of covers) scrolling through the list turns
-       * into repeated full-directory SD-card scans - it's what would
-       * make this collapse at real-world library sizes even though it's
-       * unnoticeable with a handful of games. filestream_exists() on a
-       * short, fixed extension list is O(1) per game regardless of how
-       * many covers exist. */
-      static const char *hakswitch_art_exts[] = { "png", "jpg", "jpeg" };
-      size_t ei;
+      hakswitch_discover_params_t *params;
 
       slot->tried = true;
 
-      /* roms_dir is ".../<ConsoleName>/roms" - its sibling "capas"
-       * folder is where covers for every game in it live. */
-      fill_pathname_parent_dir(console_dir, roms_dir, sizeof(console_dir));
+      params = (hakswitch_discover_params_t*)calloc(1, sizeof(*params));
+      if (params)
       {
-         size_t clen = strlen(console_dir);
-         if (clen > 0 && (console_dir[clen - 1] == '/' || console_dir[clen - 1] == '\\'))
-            console_dir[clen - 1] = '\0';
-      }
-      fill_pathname_join_special(capas_dir, console_dir, "capas", sizeof(capas_dir));
+         retro_task_t *task;
 
-      strlcpy(rom_name_noext, rom_filename, sizeof(rom_name_noext));
-      path_remove_extension(rom_name_noext);
+         strlcpy(params->roms_dir, roms_dir, sizeof(params->roms_dir));
+         strlcpy(params->rom_filename, rom_filename, sizeof(params->rom_filename));
+         params->slot = slot;
 
-      for (ei = 0; ei < sizeof(hakswitch_art_exts) / sizeof(hakswitch_art_exts[0]); ei++)
-      {
-         char cover_path[1200];
-
-         fill_pathname_join_special(cover_path, capas_dir, rom_name_noext, sizeof(cover_path));
-         strlcat(cover_path, ".", sizeof(cover_path));
-         strlcat(cover_path, hakswitch_art_exts[ei], sizeof(cover_path));
-
-         if (filestream_exists(cover_path))
+         task = task_init();
+         if (task)
          {
-#if !defined(HAKSWITCH_DIAG_NO_IMAGES)
-            task_push_image_load(cover_path,
-                  (video_driver_get_disp_flags() & VIDEO_FLAG_USE_RGBA), 0, 0,
-                  hakswitch_game_cover_upload_cb, slot);
-#endif
-            break;
+            task->handler  = hakswitch_discover_handler;
+            task->state    = params;
+            task->callback = hakswitch_discover_cb;
+            task->cleanup  = hakswitch_discover_cleanup;
+            task_queue_push(task);
          }
-      }
-
-      {
-         char screenshots_dir[1024];
-
-         fill_pathname_join_special(screenshots_dir, console_dir, "screenshots", sizeof(screenshots_dir));
-
-         for (ei = 0; ei < sizeof(hakswitch_art_exts) / sizeof(hakswitch_art_exts[0]); ei++)
-         {
-            char shot_path[1200];
-
-            fill_pathname_join_special(shot_path, screenshots_dir, rom_name_noext, sizeof(shot_path));
-            strlcat(shot_path, ".", sizeof(shot_path));
-            strlcat(shot_path, hakswitch_art_exts[ei], sizeof(shot_path));
-
-            if (filestream_exists(shot_path))
-            {
-#if !defined(HAKSWITCH_DIAG_NO_IMAGES)
-               task_push_image_load(shot_path,
-                     (video_driver_get_disp_flags() & VIDEO_FLAG_USE_RGBA), 0, 0,
-                     hakswitch_game_screenshot_upload_cb, slot);
-#endif
-               break;
-            }
-         }
-      }
-
-      /* Metadata json - same basename-match convention, sibling
-       * "metadata" folder instead of "capas". Uses plain C stdio
-       * instead of RetroArch's filestream_read_file, which was
-       * mysteriously only reading 1 byte of this file regardless of
-       * its real size. */
-      {
-         char metadata_dir[1024];
-         char json_path[1200];
-         FILE *f;
-
-         fill_pathname_join_special(metadata_dir, console_dir, "metadata", sizeof(metadata_dir));
-         fill_pathname_join_special(json_path, metadata_dir, rom_name_noext, sizeof(json_path));
-         strlcat(json_path, ".json", sizeof(json_path));
-
-         if ((f = fopen(json_path, "rb")))
-         {
-            long file_size;
-            fseek(f, 0, SEEK_END);
-            file_size = ftell(f);
-            fseek(f, 0, SEEK_SET);
-
-            if (file_size > 0)
-            {
-               char *json_str = (char*)malloc((size_t)file_size + 1);
-               if (json_str)
-               {
-                  size_t n = fread(json_str, 1, (size_t)file_size, f);
-                  json_str[n] = '\0';
-
-                  hakswitch_json_extract_string(json_str, "name", slot->name, sizeof(slot->name));
-                  hakswitch_json_extract_string(json_str, "description", slot->description, sizeof(slot->description));
-                  hakswitch_json_extract_string(json_str, "year", slot->year, sizeof(slot->year));
-                  hakswitch_json_extract_string(json_str, "region", slot->region, sizeof(slot->region));
-
-                  free(json_str);
-               }
-            }
-            fclose(f);
-         }
+         else
+            free(params);
       }
    }
+#endif
 
    return slot;
 }
@@ -6487,6 +6687,35 @@ typedef struct
    hakswitch_hud_icon_t *icon2;
    const char *label;
 } hakswitch_hud_hint_t;
+
+/* HAKSWITCH TEST: is the currently displayed list one hakswitch itself
+ * built (DISPLAYLIST_MAIN_MENU's case in menu_displaylist.c, which
+ * labels every entry it appends "hakswitch_dir"/"hakswitch_file")?
+ * Every hakswitch chrome/behavior gate (carousel rendering, hidden
+ * sidebar, B-button and MINUS quit) used to also require
+ * tabs[categories_selection_ptr] == OZONE_SYSTEM_TAB_MAIN and
+ * MENU_LIST_GET_STACK_SIZE(menu_list, 0) <= 1. Confirmed on hardware:
+ * after "Close Content" (entering a game, then leaving it), that
+ * combination can come back false - tab and/or stack depth end up
+ * different from a cold boot - even though hakswitch_current_path is
+ * perfectly correct and DISPLAYLIST_MAIN_MENU is still building our
+ * own content underneath (the screen shows the right folder, just in
+ * stock Ozone chrome, gates all skipped). Checking the list's own
+ * labels instead of the surrounding tab/stack bookkeeping sidesteps
+ * that entirely: whatever tab or depth got us here, if this list is
+ * ours, it's ours. Mirrors the existing "is this our Quick Menu"
+ * check just below (RESUME_CONTENT-as-first-entry), same list-content
+ * philosophy. */
+static bool hakswitch_list_is_ours(menu_list_t *menu_list)
+{
+   file_list_t *list = MENU_LIST_GET_SELECTION(menu_list, 0);
+
+   if (!list || list->size == 0 || !list->list[0].label)
+      return false;
+
+   return string_is_equal(list->list[0].label, "hakswitch_dir")
+       || string_is_equal(list->list[0].label, "hakswitch_file");
+}
 
 static void hakswitch_draw_hud_bar(ozone_handle_t *ozone, gfx_display_t *p_disp,
       void *userdata, unsigned video_width, unsigned video_height, bool inside_console)
@@ -10143,6 +10372,29 @@ static enum menu_action ozone_parse_menu_entry_action(
    file_list_t *selection_buf     = NULL;
    unsigned horizontal_list_size  = 0;
 
+   /* HAKSWITCH TEST: dedicated quit hotkey (MINUS, which RetroArch's
+    * input layer maps to MENU_ACTION_INFO by default). The B-button
+    * quit further below only fires when a whole chain of state lines
+    * up (tab == MAIN, menu_stack_size <= 1, hakswitch_current_path ==
+    * hakswitch_root_path); after returning from a game that chain has
+    * repeatedly not lined up the way B's logic expects. This check
+    * deliberately does NOT read any of that hakswitch-specific state -
+    * it only asks "is a game actually running right now" (the same
+    * question the system already tracks for its own purposes, via
+    * CORE_TYPE_DUMMY), so it can't be thrown off by whatever state
+    * Close Content leaves hakswitch's own bookkeeping in.
+    * Gated on RARCH_CTL_IS_DUMMY_CORE (no content loaded) specifically
+    * so this does NOT fire while a game is running and its Quick Menu
+    * is open (reached via the existing, untouched +/- hotkey combo) -
+    * MENU_ACTION_INFO there still means "show info" as before, so a
+    * player pressing MINUS alone mid-game to see content info doesn't
+    * get bounced out of their game. */
+   if (action == MENU_ACTION_INFO && retroarch_ctl(RARCH_CTL_IS_DUMMY_CORE, NULL))
+   {
+      command_event(CMD_EVENT_QUIT, NULL);
+      return MENU_ACTION_NOOP;
+   }
+
    /* HAKSWITCH TEST: our carousel is laid out horizontally, so left/right
     * is the natural way to move through it - remap them to up/down
     * (which already move selection_ptr with wraparound below) instead of
@@ -10151,12 +10403,18 @@ static enum menu_action ozone_parse_menu_entry_action(
     * switch further down dispatches on 'action' but the function returns
     * 'new_action'. */
    /* HAKSWITCH TEST: same "are we actually on our own screen" check as
-    * ozone_frame's draw gate - without the stack-size check, opening
-    * the in-game Quick Menu (still tab MAIN, but with its own list
-    * pushed on top) would also get our B-button/left-right overrides,
-    * corrupting hakswitch_current_path and hijacking Quick Menu nav. */
-   if (ozone->tabs[ozone->categories_selection_ptr] == OZONE_SYSTEM_TAB_MAIN
-         && menu_stack_size <= 1)
+    * ozone_frame's draw gate - content-based (hakswitch_list_is_ours),
+    * not tab/stack-size based. That combination was confirmed on
+    * hardware to come back false after returning from a game even
+    * though this list is still ours, silently skipping B/MINUS quit
+    * entirely - see hakswitch_list_is_ours's comment for the full
+    * story. */
+   if (action == MENU_ACTION_CANCEL)
+      hakswitch_debug_log("[HAKSWITCH_PROFILE] B pressed: tab=%d stack_size=%u ours=%d cur=\"%s\" root=\"%s\"\n",
+            ozone->tabs[ozone->categories_selection_ptr], (unsigned)menu_stack_size,
+            hakswitch_list_is_ours(menu_list), hakswitch_current_path, hakswitch_root_path);
+
+   if (hakswitch_list_is_ours(menu_list))
    {
       bool inside_console = !string_is_equal(hakswitch_current_path, hakswitch_root_path);
 
@@ -10206,6 +10464,18 @@ static enum menu_action ozone_parse_menu_entry_action(
          /* Custom handler bypasses RetroArch's own default Cancel
           * callback (menu_cbs_cancel.c), so it needs its own sound cue. */
          audio_driver_mixer_play_menu_sound(AUDIO_MIXER_SYSTEM_SLOT_CANCEL);
+      }
+      else if (!inside_console && action == MENU_ACTION_CANCEL)
+      {
+         /* HAKSWITCH TEST: B at the true root (console list) quits
+          * straight away - no confirmation dialog yet (a prior attempt
+          * using RetroArch's generic menu_dialog_confirm_set broke the
+          * console list rendering, cause not yet isolated; this direct
+          * command_event call is deliberately as small/isolated as
+          * possible to confirm the quit mechanism itself is fine before
+          * layering a confirmation prompt back on top). */
+         command_event(CMD_EVENT_QUIT, NULL);
+         action = MENU_ACTION_NOOP;
       }
 
       if (action == MENU_ACTION_LEFT)
@@ -13978,9 +14248,10 @@ static void ozone_frame(void *data, video_frame_info_t *video_info)
     * carousel screen. Everywhere else (Quick Menu, Settings, ...) keeps
     * whatever stock Ozone computed just above, which is what actually
     * shows the paused game frame (dimmed via menu_framebuffer_opacity)
-    * behind the custom Quick Menu overlay. */
-   if ((ozone->tabs[ozone->categories_selection_ptr] == OZONE_SYSTEM_TAB_MAIN)
-         && (MENU_LIST_GET_STACK_SIZE(menu_list, 0) <= 1))
+    * behind the custom Quick Menu overlay. Content-based check
+    * (hakswitch_list_is_ours) - see its comment for why tab/stack-size
+    * alone isn't reliable after returning from a game. */
+   if (hakswitch_list_is_ours(menu_list))
    {
       static float hakswitch_bg[16] = COLOR_HEX_TO_FLOAT(0x1b0f3a, 1.00f);
       background_color = hakswitch_bg;
@@ -14006,17 +14277,15 @@ static void ozone_frame(void *data, video_frame_info_t *video_info)
       gfx_display_rotate_z(p_disp, &mymat, cosine, sine, userdata);
    }
 
-   /* HAKSWITCH TEST: only the Main Menu tab (our folder carousel) goes
-    * chrome-free / carousel-rendered. Every other tab (Settings,
-    * History, Load Content, etc.) keeps the normal Ozone UI so it
-    * stays usable while we test. The tab alone isn't enough though -
-    * opening the in-game Quick Menu (F1) pushes a new list (Resume,
-    * Restart, Close Content...) on top of the stack WITHOUT changing
-    * tabs, so without also checking the stack depth our carousel was
-    * hijacking that screen too, rendering empty cards over "Resume". */
+   /* HAKSWITCH TEST: only our own screen (hakswitch_list_is_ours) goes
+    * chrome-free / carousel-rendered. Everything else (Settings,
+    * History, Load Content, Quick Menu, etc.) keeps the normal Ozone
+    * UI so it stays usable. Used to also require tab == MAIN and
+    * stack_size <= 1, but that combination was confirmed on hardware
+    * to go false after returning from a game even while this list is
+    * still ours - see hakswitch_list_is_ours's comment. */
    {
-   bool hakswitch_on_main_menu = (ozone->tabs[ozone->categories_selection_ptr] == OZONE_SYSTEM_TAB_MAIN)
-         && (MENU_LIST_GET_STACK_SIZE(menu_list, 0) <= 1);
+   bool hakswitch_on_main_menu = hakswitch_list_is_ours(menu_list);
 
    /* Detects our own custom Quick Menu list (see the
     * DISPLAYLIST_CONTENT_SETTINGS case in menu_displaylist.c) purely
@@ -14039,6 +14308,7 @@ static void ozone_frame(void *data, video_frame_info_t *video_info)
    }
 
    hakswitch_check_pending_launch();
+   hakswitch_process_pending_uploads();
    hakswitch_ensure_launch_sfx_loaded();
    /* Ambient music only belongs on the carousel itself - not over the
     * Quick Menu (F1) or any other tab, and definitely not once actual

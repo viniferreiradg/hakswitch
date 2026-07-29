@@ -63,6 +63,20 @@ HAVE_SSL = 1
 # RetroArch libnx useful flags
 HAVE_THREADS = 1
 HAVE_PTHREADS = 1
+# HAKSWITCH TEST: writes RARCH_LOG output to sdmc:/retroarch-log.txt -
+# needed to pull timing instrumentation off real hardware. Not on by
+# default upstream. Fine to leave on; it's just RARCH_LOG text output.
+# HAVE_FILE_LOGGER isn't one of the flags switch_rules/Makefile.common
+# already translates into a -D define (unlike HAVE_NETLOGGER, which
+# maps to -DHAVE_LOGGER) - setting the make variable alone silently
+# defined nothing for the C preprocessor, so every platform_switch.c
+# #elif defined(HAVE_FILE_LOGGER) block below was dead code the whole
+# time. Confirmed by grepping the whole Makefile tree for a matching
+# ifeq/DEFINES block: there wasn't one.
+HAVE_FILE_LOGGER = 1
+ifeq ($(HAVE_FILE_LOGGER), 1)
+   DEFINES += -DHAVE_FILE_LOGGER
+endif
 HAVE_FREETYPE = 0
 HAVE_SWITCH = 1
 HAVE_LIBNX = 1

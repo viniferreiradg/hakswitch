@@ -1345,10 +1345,25 @@
 /* MISC */
 
 /* Enables displaying the current frames per second. */
+/* HAKSWITCH TEST: on by default on Switch - the carousel replaces
+ * RetroArch's normal settings menu entirely, so there's no in-app way
+ * to reach Settings > Onscreen Display to toggle this at runtime. Useful
+ * right now to watch frame drops live while testing the cover-art
+ * loading stutter, alongside the sdmc:/retroarch-log.txt timing log. */
+#if defined(HAVE_LIBNX)
+#define DEFAULT_FPS_SHOW true
+#else
 #define DEFAULT_FPS_SHOW false
+#endif
 
-/* FPS display will be updated at the set interval (in frames) */
+/* FPS display will be updated at the set interval (in frames) - lower
+ * on Switch (default 256 frames, ~4s at 60fps, is too slow to see a
+ * brief stutter while scrolling). */
+#if defined(HAVE_LIBNX)
+#define DEFAULT_FPS_UPDATE_INTERVAL 15
+#else
 #define DEFAULT_FPS_UPDATE_INTERVAL 256
+#endif
 
 /* Memory status display will be updated at the set interval (in frames) */
 #define DEFAULT_MEMORY_UPDATE_INTERVAL 256

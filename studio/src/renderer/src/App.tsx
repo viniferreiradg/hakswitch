@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Gamepad2, LayoutGrid, Search, Settings, Smartphone, Upload } from 'lucide-react'
 import type { BuildResult, Game, ImportResult, Platform, ScrapeResult } from '../../shared/types'
 import SettingsPanel from './SettingsPanel'
@@ -107,6 +107,7 @@ function App(): React.JSX.Element {
   const [search, setSearch] = useState('')
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [lastClickedIndex, setLastClickedIndex] = useState<number | null>(null)
+  const rowRefs = useRef<Map<number, HTMLDivElement>>(new Map())
 
   const [formTitle, setFormTitle] = useState('')
   const [formPlatformId, setFormPlatformId] = useState(0)
@@ -307,6 +308,47 @@ function App(): React.JSX.Element {
     }
   }
 
+  // Ctrl+A seleciona tudo que está filtrado na tela (não o total da
+  // biblioteca) - setas navegam item a item, substituindo o scroll padrão
+  // do navegador, que era o único efeito que as setas tinham antes. Ignora
+  // as duas coisas quando o foco está num campo de texto (busca, título,
+  // categoria, etc.) pra não atrapalhar digitação/seleção de texto normal.
+  useEffect(() => {
+    const isTypingTarget = (target: EventTarget | null): boolean => {
+      const tag = (target as HTMLElement | null)?.tagName
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+    }
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (isTypingTarget(event.target)) return
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+        event.preventDefault()
+        setSelectedIds(new Set(filteredGames.map((game) => game.id)))
+        return
+      }
+
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        if (filteredGames.length === 0) return
+        event.preventDefault()
+
+        const currentIndex = lastClickedIndex ?? 0
+        const nextIndex = Math.min(
+          filteredGames.length - 1,
+          Math.max(0, currentIndex + (event.key === 'ArrowDown' ? 1 : -1))
+        )
+        const nextGame = filteredGames[nextIndex]
+
+        setSelectedIds(new Set([nextGame.id]))
+        setLastClickedIndex(nextIndex)
+        rowRefs.current.get(nextGame.id)?.scrollIntoView({ block: 'nearest' })
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [filteredGames, lastClickedIndex])
+
   const saveSingleEdit = async (): Promise<void> => {
     if (!singleGame) return
     await window.api.library.updateGame(singleGame.id, {
@@ -497,6 +539,10 @@ function App(): React.JSX.Element {
           {filteredGames.map((game, index) => (
             <div
               key={game.id}
+              ref={(el) => {
+                if (el) rowRefs.current.set(game.id, el)
+                else rowRefs.current.delete(game.id)
+              }}
               onClick={(event) => handleRowClick(game, index, event)}
               className={`flex h-11 cursor-pointer items-center gap-4 rounded-button px-4 transition-colors hover:bg-white/5 ${
                 selectedIds.has(game.id) ? 'bg-accent/15' : ''
@@ -556,12 +602,18 @@ function App(): React.JSX.Element {
 
             {coverDataUrl ? (
               <img
-                className="mx-auto w-[220px] rounded-[10px] object-cover"
+                className="mx-auto w-[220px] cursor-pointer rounded-[10px] object-cover transition-opacity hover:opacity-80"
                 src={coverDataUrl}
                 alt={singleGame.title}
+                title="Clique para trocar a capa"
+                onClick={pickCoverForSingle}
               />
             ) : (
-              <div className="mx-auto flex h-[300px] w-[220px] items-center justify-center rounded-[10px] bg-card text-4xl text-text-secondary">
+              <div
+                className="mx-auto flex h-[300px] w-[220px] cursor-pointer items-center justify-center rounded-[10px] bg-card text-4xl text-text-secondary transition-opacity hover:opacity-80"
+                title="Clique para escolher uma capa"
+                onClick={pickCoverForSingle}
+              >
                 {singleGame.title.slice(0, 1)}
               </div>
             )}

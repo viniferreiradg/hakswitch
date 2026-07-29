@@ -39,3 +39,18 @@ Thumbs.db
 .claude/
 retroarch/build_libnx_output*.txt
 retroarch/build_libnx_verify.log
+retroarch/build_*.txt
+retroarch/configure_pc.txt
+
+# mupen64plus_next é 155MB - acima do limite de 100MB do GitHub pra arquivo
+# comum (precisaria de Git LFS). Fica só em disco, não versionado - se
+# precisar recriar, o fix necessário (switch/mman.h, virtmemReserve ->
+# virtmemFindAslr) está documentado na memória do projeto.
+core-libs-backup/mupen64plus_next_libretro_libnx.a
+
+# --- clones de trabalho dos repos upstream de cada core (libretro-*) -
+# usados so pra extrair o .a estatico via Makefile.libretro platform=libnx;
+# tem git proprio (repo aninhado) e são reclonaveis do GitHub publico a
+# qualquer momento. O artefato que importa (o .a compilado) fica versionado
+# em core-libs-backup/, não aqui. ---
+core-src-*/

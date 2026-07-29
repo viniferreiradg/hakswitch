@@ -1316,6 +1316,28 @@ bool video_driver_texture_load(void *data,
       enum texture_filter_type  filter_type,
       uintptr_t *id);
 
+/* HAKSWITCH TEST: see video_driver_texture_load_async_pending() and the
+ * hakswitch_async_load comment in gfx/video_thread_wrapper.h. Unlike
+ * video_driver_texture_load() above, this returns immediately without
+ * waiting for the GPU upload - id, width and height are written later,
+ * from the video thread, once the upload actually runs. Only safe to
+ * call again for a DIFFERENT request once
+ * video_driver_texture_load_async_pending() reports false; falls back
+ * to the synchronous path (behaving exactly like
+ * video_driver_texture_load() above) when threaded video isn't active,
+ * so it's always safe to call. Returns false only when threaded video
+ * is active and a previous request is still in flight - the caller
+ * should retry later rather than lose the request. */
+bool video_driver_texture_load_async(void *data,
+      enum texture_filter_type  filter_type,
+      uintptr_t *id, unsigned *width, unsigned *height);
+
+/* True while a request queued via video_driver_texture_load_async()
+ * above hasn't been picked up by the video thread yet. Always false
+ * when threaded video isn't active (that path never queues anything -
+ * it runs synchronously and returns already-done). */
+bool video_driver_texture_load_async_pending(void);
+
 bool video_driver_texture_unload(uintptr_t *id);
 
 void video_driver_build_info(video_frame_info_t *video_info);

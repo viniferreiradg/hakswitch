@@ -8,10 +8,20 @@ const BASE_URL = 'https://api.thegamesdb.net/v1'
 // Nome da nossa plataforma -> trecho que deve aparecer no nome da plataforma
 // na TheGamesDB (a busca e por substring, nao id fixo, porque os ids da TGDB
 // nao sao garantidos estaveis o suficiente pra hardcodar com confianca).
+// As chaves aqui TEM que ser exatamente os nomes salvos na tabela `platforms`
+// do Studio (ex: "Nintendo", nao "NES") - Master System, Game Boy e Game Boy
+// Color estavam faltando por completo, e Nintendo/Super Nintendo usavam
+// chaves erradas (NES/SNES) que nunca batiam com nada - nos dois casos o
+// filtro de plataforma silenciosamente nunca era aplicado, e a busca podia
+// trazer metadado/capa de outra plataforma com jogo de nome igual (ex:
+// Asterix de Atari 2600 aparecendo pra Asterix de Master System).
 const PLATFORM_NAME_HINTS: Record<string, string> = {
-  NES: 'Nintendo Entertainment System',
-  SNES: 'Super Nintendo',
+  Nintendo: 'Nintendo Entertainment System',
+  'Super Nintendo': 'Super Nintendo',
+  'Master System': 'Master System',
   'Mega Drive': 'Genesis',
+  'Game Boy': 'Game Boy',
+  'Game Boy Color': 'Game Boy Color',
   'Game Boy Advance': 'Game Boy Advance',
   Arcade: 'Arcade',
   'Nintendo 64': 'Nintendo 64',
@@ -57,13 +67,25 @@ async function getPlatformsMap(apiKey: string): Promise<Map<string, number>> {
 
   const json = await fetchJson(apiKey, '/Platforms', {})
   const byId = json.data.platforms as Record<string, { id: number; name: string }>
+  const allPlatforms = Object.values(byId)
 
   const map = new Map<string, number>()
   for (const [ourName, hint] of Object.entries(PLATFORM_NAME_HINTS)) {
-    const match = Object.values(byId).find((platform) =>
-      platform.name.toLowerCase().includes(hint.toLowerCase())
+    const hintLower = hint.toLowerCase()
+    const candidates = allPlatforms.filter((platform) =>
+      platform.name.toLowerCase().includes(hintLower)
     )
-    if (match) map.set(ourName, match.id)
+    if (candidates.length === 0) continue
+
+    // A hint "Game Boy" da match por substring em "Nintendo Game Boy",
+    // "...Game Boy Advance" e "...Game Boy Color" ao mesmo tempo - um match
+    // exato (igual, ignorando maiusculas) sempre ganha; sem match exato,
+    // o nome mais curto entre os candidatos e a variante "simples" (as
+    // outras so tem sufixo a mais), evitando pegar a plataforma errada por
+    // causa da ordem em que a TheGamesDB devolveu a lista.
+    const exact = candidates.find((platform) => platform.name.toLowerCase() === hintLower)
+    const match = exact ?? [...candidates].sort((a, b) => a.name.length - b.name.length)[0]
+    map.set(ourName, match.id)
   }
 
   cache.platforms = map

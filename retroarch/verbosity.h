@@ -53,6 +53,19 @@ void retro_main_log_file_init(const char *path, bool append);
 
 bool is_logging_to_file(void);
 
+/* HAKSWITCH TEST: writes straight to a fixed file with a bare
+ * fopen/vfprintf/fclose every call - no verbosity_enable(), no
+ * override system, no dependency on main_verbosity_st at all. Added
+ * after the RARCH_LOG-based logging path (verbosity_enable +
+ * rarch_log_file_set_override) repeatedly produced a log truncated to
+ * one line on real Switch hardware despite several rounds of fixes
+ * that should have worked reading the source - something in that
+ * chain still isn't understood. This sidesteps all of it: if this
+ * still doesn't show up, the problem is filesystem/DBI-side, not
+ * RetroArch's logging plumbing. Appends every call, so a whole
+ * session accumulates in one file. Not verbosity-gated on purpose. */
+void hakswitch_debug_log(const char *fmt, ...);
+
 #if defined(HAVE_LOGGER)
 
 void logger_init (void);

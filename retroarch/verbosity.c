@@ -656,3 +656,18 @@ void rarch_log_file_deinit(void)
    if (!main_verbosity_st.fp) /* ...initialise logging to console */
       retro_main_log_file_init(NULL, false);
 }
+
+void hakswitch_debug_log(const char *fmt, ...)
+{
+#if defined(HAVE_LIBNX)
+   FILE *f = fopen("/retroarch-log.txt", "a");
+   if (f)
+   {
+      va_list ap;
+      va_start(ap, fmt);
+      vfprintf(f, fmt, ap);
+      va_end(ap);
+      fclose(f);
+   }
+#endif
+}

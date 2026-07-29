@@ -220,7 +220,16 @@ static void *libnx_audren_thread_audio_init(const char *device, unsigned rate, u
       }
    }
 
-   aud->fifo = fifo_new(aud->buffer_size);
+   /* HAKSWITCH TEST: o fifo original era do tamanho de 1 wavebuf (so
+    * real_latency ms - 64ms por padrao). Isso da pouquissima folga pra
+    * thread principal escrever adiantado: qualquer travada do frame
+    * (ex: varios uploads de capa/textura em sequencia ao rolar rapido
+    * pela lista) maior que isso esvazia o fifo e a thread de audio fica
+    * sem amostra pra tocar - e exatamente o gap audivel reportado. 4x
+    * da ~256ms de folga, absorvendo essas rajadas sem precisar mexer no
+    * pipeline de upload de textura. Custo: so memoria (poucos KB a
+    * mais), sem trade-off de latencia perceptivel pra musica de fundo. */
+   aud->fifo = fifo_new(aud->buffer_size * 4);
    if (!aud->fifo)
    {
       RARCH_ERR("[Audren] fifo alloc failed.\n");

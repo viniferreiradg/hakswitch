@@ -3313,6 +3313,69 @@ bool video_driver_texture_load(void *data,
    return true;
 }
 
+/* HAKSWITCH TEST: see the hakswitch_async_load comment in
+ * video_thread_wrapper.h for why this exists - poke->load_texture
+ * above (thread_load_texture, when threaded video is active) doesn't
+ * actually marshal onto the video thread despite the name, it just
+ * calls straight through and blocks whichever thread called it. This
+ * writes directly into the thread_video_t behind video_st->data
+ * instead of going through the poke vtable, since the vtable entry for
+ * "threaded" is exactly the blocking passthrough this is avoiding.
+ * Skips the BCn-compressed fast path in video_driver_texture_load()
+ * above on purpose - hakswitch only ever loads plain decoded PNG/JPEG
+ * cover art, never compressed blocks. */
+bool video_driver_texture_load_async(void *data,
+      enum texture_filter_type  filter_type,
+      uintptr_t *id, unsigned *width, unsigned *height)
+{
+   video_driver_state_t *video_st = &video_driver_st;
+   bool threaded;
+
+   if (!id || !width || !height)
+      return false;
+
+   threaded = VIDEO_DRIVER_IS_THREADED_INTERNAL(video_st)
+         && (video_st->flags & VIDEO_FLAG_THREAD_WRAPPER_ACTIVE);
+
+   if (threaded)
+   {
+      thread_video_t *thr = (thread_video_t*)video_st->data;
+
+      if (!thr)
+         return false;
+      if (thr->hakswitch_async_load.img)
+         return false; /* one in flight already - caller retries later */
+
+      thr->hakswitch_async_load.filter_type = filter_type;
+      thr->hakswitch_async_load.tex_out     = id;
+      thr->hakswitch_async_load.w_out       = width;
+      thr->hakswitch_async_load.h_out       = height;
+      thr->hakswitch_async_load.img         = data; /* set last: marks the slot occupied */
+      return true;
+   }
+
+   /* Not threaded - nothing to defer to, do it the normal synchronous
+    * way right here so this is always safe to call. */
+   if (!video_driver_texture_load(data, filter_type, id))
+      return false;
+   *width  = ((struct texture_image*)data)->width;
+   *height = ((struct texture_image*)data)->height;
+   return true;
+}
+
+bool video_driver_texture_load_async_pending(void)
+{
+   video_driver_state_t *video_st = &video_driver_st;
+   thread_video_t *thr;
+
+   if (!(VIDEO_DRIVER_IS_THREADED_INTERNAL(video_st)
+         && (video_st->flags & VIDEO_FLAG_THREAD_WRAPPER_ACTIVE)))
+      return false;
+
+   thr = (thread_video_t*)video_st->data;
+   return thr && thr->hakswitch_async_load.img != NULL;
+}
+
 bool video_driver_texture_unload(uintptr_t *id)
 {
    video_driver_state_t *video_st     = &video_driver_st;
@@ -4841,6 +4904,16 @@ void video_driver_frame(const void *data, unsigned width,
                status_text         + _len,
                sizeof(status_text) - _len,
                "%6.2f", last_fps);
+
+         /* HAKSWITCH TEST: on-screen build marker, shown right next to
+          * FPS - bump HAKSWITCH_BUILD_VERSION below with every build
+          * that goes to hardware, so a stale/cached .nro on the SD
+          * card is immediately visible instead of silently retesting
+          * old code (see the session-long log/path mixups this was
+          * added to stop). */
+#define HAKSWITCH_BUILD_VERSION "V1.0.00005"
+         _len += strlcpy(status_text + _len, " || " HAKSWITCH_BUILD_VERSION,
+               sizeof(status_text) - _len);
       }
 
       if (video_info.framecount_show)

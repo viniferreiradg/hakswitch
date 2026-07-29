@@ -237,6 +237,25 @@ static void hakswitch_load_last_played_state(void)
    char line[1024];
    FILE *f;
 
+   /* This runs once per process (see the guard in hakswitch_init_paths),
+    * and that includes a per-core .nro launched straight into a game:
+    * RetroArch builds the Main Menu displaylist once during its own
+    * generic startup even when it's never shown to the user, because
+    * content is already queued to auto-load (see the comment at
+    * hakswitch_restore_idx below, which already relies on this same
+    * fact for a different reason). Reading - and deleting - the state
+    * file in THAT process would destroy it before the frontend
+    * (hakswitch.nro, relaunched later by Close Content) ever gets a
+    * real chance to read it back, silently turning "return to the same
+    * screen" into "always land back at the console root". Bail here
+    * with content already pending; the frontend's own call to this
+    * function, with no content queued, is the one meant to consume it.
+    * Same idiom stock RetroArch already uses for this exact check on
+    * other console frontends (see platform_ps2.c/platform_orbis.c
+    * should_load_content). */
+   if (!path_is_empty(RARCH_PATH_CONTENT))
+      return;
+
    fill_pathname_join_special(state_path, hakswitch_base_path,
          "hakswitch_state.txt", sizeof(state_path));
 
@@ -249,7 +268,19 @@ static void hakswitch_load_last_played_state(void)
       size_t len = strlen(line);
       if (len > 0 && line[len - 1] == '\n')
          line[len - 1] = '\0';
-      if (line[0])
+      /* HAKSWITCH TEST: this file is only meant to survive to the very
+       * next boot (the "Close Content" re-exec). If that boot never
+       * consumed it - killed via HOME/power instead of returning
+       * normally, or an earlier crash - a later, unrelated boot would
+       * silently inherit a stale folder here, making the B-button
+       * root-vs-inside-console check (ozone.c,
+       * ozone_parse_menu_entry_action) think it's deep inside a
+       * console when the screen on display is actually the fresh
+       * root list. Only trust the restored path if it's still a real
+       * directory under our own root. */
+      if (line[0]
+            && !strncmp(line, hakswitch_root_path, strlen(hakswitch_root_path))
+            && path_is_directory(line))
          strlcpy(hakswitch_current_path, line, sizeof(hakswitch_current_path));
    }
 

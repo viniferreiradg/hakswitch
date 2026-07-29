@@ -247,6 +247,37 @@ typedef struct thread_video
 
    bool apply_state_changes;
 
+   /* HAKSWITCH TEST: thread_load_texture() below (the existing texture-
+    * load path through this wrapper) just calls poke->load_texture()
+    * straight through on whatever thread called it - it does not
+    * actually marshal the work onto this video thread despite being
+    * part of the "threaded video" wrapper, unlike texture.frame_updated
+    * above (which does defer to this thread's own loop). That makes
+    * texture loading fully synchronous/blocking on the calling thread
+    * even with threaded video on, confirmed as the cause of the
+    * hakswitch carousel's music stuttering when a cover art upload
+    * blocks the main thread for a couple of ms.
+    * This is a real, single-slot async path: the caller fills these
+    * fields and video_driver_texture_load_async() returns immediately;
+    * thread_update_driver_state() (this thread's own loop, already
+    * running here for texture.frame_updated) does the actual upload on
+    * its own schedule and writes the result into tex_out, w_out and
+    * h_out. Only one request in flight at a time by design - "img"
+    * being non-NULL means the slot is occupied; the caller must wait
+    * for it to clear before submitting the next one. No lock: same
+    * lock-free flag+data handoff already used by texture.frame_updated
+    * above, single producer (whichever thread calls the load) writing
+    * before setting "img" last, single consumer (this video thread)
+    * clearing "img" last after reading everything else. */
+   struct
+   {
+      void *img;
+      enum texture_filter_type filter_type;
+      uintptr_t *tex_out;
+      unsigned *w_out;
+      unsigned *h_out;
+   } hakswitch_async_load;
+
    bool alive;
    bool focus;
    bool suppress_screensaver;

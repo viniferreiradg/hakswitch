@@ -3968,6 +3968,8 @@ bool command_event(enum event_command cmd, void *data)
          break;
       case CMD_EVENT_CLOSE_CONTENT:
 #ifdef HAVE_MENU
+         hakswitch_debug_log("[HAKSWITCH_PROFILE] CMD_EVENT_CLOSE_CONTENT entered, should_quit_on_close=%d\n",
+               should_quit_on_close());
          /* If we need to quit, skip unloading the core to avoid performing
           * cleanup actions (like writing autosave state) twice. */
          if (should_quit_on_close())
@@ -3976,6 +3978,50 @@ bool command_event(enum event_command cmd, void *data)
             break;
          }
 
+#if defined(HAVE_LIBNX)
+         hakswitch_debug_log("[HAKSWITCH_PROFILE] CMD_EVENT_CLOSE_CONTENT: taking hakswitch.nro redirect path\n");
+         /* HAKSWITCH TEST: theory, NOT yet confirmed on hardware - on
+          * this static/non-dynamic build, every .nro is RetroArch+
+          * exactly one core statically linked - the generic
+          * MENU_ST_FLAG_PENDING_CLOSE_CONTENT path below stays
+          * in the SAME process and calls task_push_start_dummy_core(),
+          * which (see task_content.c) just re-runs retroarch_main_init()
+          * in place, still with THIS SAME real core as RARCH_PATH_CORE
+          * (there is no separate "dummy" binary to fall back to from
+          * inside a single-core .nro). Read from source, not verified
+          * on hardware yet: the result is RetroArch's own generic
+          * "core loaded, no content" screen (a raw file browser, core
+          * name in the footer), bypassing hakswitch's
+          * DISPLAYLIST_MAIN_MENU override entirely - every
+          * hakswitch-specific gate downstream (carousel rendering,
+          * hidden sidebar, B/MINUS quit) is
+          * keyed off that displaylist and never even fires.
+          * Game launch already solves the equivalent problem by
+          * re-executing into the target core's own .nro (see
+          * action_ok_hakswitch_open_file, menu_cbs_ok.c) instead of
+          * trying to hot-swap cores in place. Close Content needs the
+          * same treatment, just aimed at hakswitch.nro itself (the
+          * dummy/frontend build) instead of a game core - this is
+          * the exact mechanism task_push_load_content_with_new_core_
+          * from_menu uses for the non-dynamic launch path
+          * (command_event_cmd_exec + CMD_EVENT_QUIT), reproduced here
+          * inline since that helper is static to task_content.c. */
+         {
+            /* Run the same autosave/disk-index/remap/shader cleanup
+             * CMD_EVENT_UNLOAD_CORE always does, but tell it to skip
+             * task_push_start_dummy_core() (the "load_dummy_core"
+             * bool below, passed by address per its call signature) -
+             * that call is exactly the same-process reinit that keeps
+             * this real core loaded instead of returning to
+             * hakswitch.nro, see the comment above. */
+            bool hakswitch_no_dummy_core = false;
+            command_event(CMD_EVENT_UNLOAD_CORE, &hakswitch_no_dummy_core);
+         }
+         path_clear(RARCH_PATH_CONTENT);
+         path_set(RARCH_PATH_CORE, "/switch/hakswitch.nro");
+         frontend_driver_set_fork(FRONTEND_FORK_CORE);
+         command_event(CMD_EVENT_QUIT, NULL);
+#else
          /* Closing content via hotkey requires toggling menu
           * and resetting the position later on to prevent
           * going to empty Quick Menu */
@@ -3989,6 +4035,7 @@ bool command_event(enum event_command cmd, void *data)
          /* Remove stale notifications after reinit */
          dispwidget_get_ptr()->flags &= ~DISPGFX_WIDGET_FLAG_PERSISTING;
 #endif
+#endif /* HAVE_LIBNX */
 
 #else
          command_event(CMD_EVENT_QUIT, NULL);

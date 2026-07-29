@@ -227,7 +227,14 @@ static void frontend_switch_get_env(
 #if defined(HAVE_LOGGER)
    logger_init();
 #elif defined(HAVE_FILE_LOGGER)
-   retro_main_log_file_init(SD_PREFIX "/retroarch-log.txt");
+   /* HAKSWITCH TEST: moved to frontend_switch_init() below - this
+    * function (frontend_ctx_switch.environment_get) is only ever
+    * invoked from frontend_salamander.c's standalone main(), which
+    * this Makefile.libnx build doesn't compile (grepped every call
+    * site in the tree to confirm). Every log-file fix attempted here
+    * was silently dead code; the single "[Config] Loading salamander
+    * config..." line the log always showed turned out to be a stale
+    * file DBI kept re-copying, never actually rewritten by this app. */
 #endif
 #endif
 
@@ -596,6 +603,25 @@ static void frontend_switch_init(void *data)
 #ifdef HAVE_LIBNX
    Result rc;
    bool recording_supported      = false;
+
+   hakswitch_debug_log("[HAKSWITCH_PROFILE] frontend_switch_init boot\n");
+
+#if defined(HAVE_FILE_LOGGER) && !defined(IS_SALAMANDER)
+   /* HAKSWITCH TEST: this is the real init function called via
+    * frontend_driver_init_first() -> current_frontend_ctx->init()
+    * (frontend_driver.c) - unlike frontend_switch_get_env() above
+    * (environment_get), which is dead code on this build. Uses the
+    * same override path the --log-file command-line option uses, so
+    * retroarch.c's own post-config-load log-file check (retroarch.c,
+    * RARCH_OVERRIDE_SETTING_LOG_TO_FILE) picks up our path instead of
+    * closing it and reverting to stderr (invisible with no console
+    * attached), which is what a plain retro_main_log_file_init() call
+    * here would otherwise get undone by. */
+   verbosity_enable();
+   retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_VERBOSITY, NULL);
+   retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_LOG_TO_FILE, NULL);
+   rarch_log_file_set_override(SD_PREFIX "/retroarch/retroarch-log.txt");
+#endif
 
    nifmInitialize(NifmServiceType_User);
 

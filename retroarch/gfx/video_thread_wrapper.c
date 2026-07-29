@@ -183,6 +183,39 @@ static void thread_update_driver_state(thread_video_t *thr)
          thr->poke->apply_state_changes(thr->driver_data);
       thr->apply_state_changes = false;
    }
+
+   /* HAKSWITCH TEST: see the hakswitch_async_load comment in
+    * video_thread_wrapper.h - runs the real (synchronous, from this
+    * thread's point of view) texture upload here, on the video thread,
+    * instead of on whatever thread called
+    * video_driver_texture_load_async(). "img" is cleared last so the
+    * caller's busy-check (video_driver_texture_load_async_pending())
+    * only sees the slot free once tex_out/w_out/h_out are already
+    * written. */
+   if (thr->hakswitch_async_load.img)
+   {
+      if (thr->driver_data && thr->poke && thr->poke->load_texture)
+      {
+         struct texture_image *ti = (struct texture_image*)thr->hakswitch_async_load.img;
+         /* HAKSWITCH TEST: Phase 1 profiling - real ms cost of the GL
+          * call itself, on the video thread, isolated from everything
+          * else (task overhead, discovery, decode, queueing). This is
+          * the number the whole investigation has been chasing without
+          * ever actually measuring it directly. */
+         retro_time_t hakswitch_gpu_t0 = cpu_features_get_time_usec();
+
+         *thr->hakswitch_async_load.tex_out = thr->poke->load_texture(
+               thr->driver_data, thr->hakswitch_async_load.img, true,
+               thr->hakswitch_async_load.filter_type);
+         *thr->hakswitch_async_load.w_out = ti->width;
+         *thr->hakswitch_async_load.h_out = ti->height;
+
+         hakswitch_debug_log("[HAKSWITCH_PROFILE] gpu_upload %ux%u: %.2f ms\n",
+               ti->width, ti->height,
+               (cpu_features_get_time_usec() - hakswitch_gpu_t0) / 1000.0);
+      }
+      thr->hakswitch_async_load.img = NULL;
+   }
 }
 
 /* returns true when video_thread_loop should quit */
