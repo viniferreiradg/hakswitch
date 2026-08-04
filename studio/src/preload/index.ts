@@ -22,6 +22,7 @@ const api = {
   },
   build: {
     generate: (): Promise<BuildResult | null> => ipcRenderer.invoke('build:generate'),
+    generateTico: (): Promise<BuildResult | null> => ipcRenderer.invoke('build:generateTico'),
     openFolder: (path: string): Promise<void> => ipcRenderer.invoke('build:openFolder', path)
   },
   library: {

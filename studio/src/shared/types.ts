@@ -93,6 +93,7 @@ export interface ConfigApi {
 
 export interface BuildApi {
   generate(): Promise<BuildResult | null>
+  generateTico(): Promise<BuildResult | null>
   openFolder(path: string): Promise<void>
 }
 

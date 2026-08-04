@@ -6,7 +6,7 @@ import icon from '../../resources/icon.png?asset'
 import * as library from './library-service'
 import * as config from './config'
 import { readAsDataUrl } from './assets'
-import { buildLibrary } from './build-service'
+import { buildLibrary, buildTicoLibrary } from './build-service'
 import { templatePlatformArtPath } from './template'
 import type { GamePatch, StudioConfig } from '../shared/types'
 
@@ -145,6 +145,15 @@ app.whenReady().then(() => {
     })
     if (result.canceled || !result.filePaths[0]) return null
     return buildLibrary(result.filePaths[0])
+  })
+  ipcMain.handle('build:generateTico', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory', 'createDirectory'],
+      title: 'Escolha a pasta do TICO (onde ficam roms/, assets/, config/...)',
+      defaultPath: existsSync(DEFAULT_BUILD_DIR) ? DEFAULT_BUILD_DIR : undefined
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    return buildTicoLibrary(result.filePaths[0])
   })
   ipcMain.handle('build:openFolder', (_event, path: string) => shell.openPath(path))
 

@@ -234,12 +234,149 @@ extern char hakswitch_base_path[1024];
 extern char hakswitch_root_path[1024];
 extern char hakswitch_current_path[1024];
 extern char hakswitch_last_played_path[1024];
+/* "Opções do Hakswitch" toggles + their persistence, both owned by
+ * menu_displaylist.c (see hakswitch_load_settings/hakswitch_save_settings
+ * there) - these OK handlers just flip a bool and ask it to save. */
+extern bool hakswitch_setting_music_enabled;
+extern bool hakswitch_setting_bg_enabled;
+extern bool hakswitch_setting_covers_enabled;
+extern void hakswitch_save_settings(void);
 /* Kept in sync with the identical #define in menu_displaylist.c,
  * which is what actually preloads the sound into this slot. */
 #define HAKSWITCH_LAUNCH_SFX_SLOT 0
 /* ozone.c - owns the carousel draw, so it owns the "selected card
  * pulse" animation too. */
 extern void hakswitch_trigger_select_pulse(void);
+
+/* HAKSWITCH TEST: "Sair do HakSwitch" entry in the 2-item root menu (B at
+ * the console-list root - see DISPLAYLIST_CONTENT_SETTINGS's
+ * RARCH_CTL_IS_DUMMY_CORE branch in menu_displaylist.c). Quits directly,
+ * deliberately NOT via the stock action_ok_quit/MENU_ENUM_LABEL_QUIT_RETROARCH
+ * path, which calls menu_dialog_confirm_set() when confirm_quit is on - the
+ * same confirm-dialog mechanism a prior attempt at a quit confirmation here
+ * already broke console-list rendering with (see the comment this replaced
+ * in ozone.c, ozone_parse_menu_entry_action). The 2-item menu itself is
+ * already the confirmation - the user had to explicitly pick "Sair do
+ * HakSwitch" instead of just bumping into a single B press - so no further
+ * dialog is needed on top. */
+static int action_ok_hakswitch_quit(const char *path,
+      const char *label, unsigned type, size_t idx, size_t entry_idx)
+{
+   command_event(CMD_EVENT_QUIT, NULL);
+   return 0;
+}
+
+/* HAKSWITCH TEST: "Voltar" entry in the root menu - just pops this list
+ * off the stack, identical to what B/cancel already does by default
+ * here (action_cancel_pop_default, bound generically below). Gives
+ * players an explicit on-screen way back without relying on the
+ * physical B button. */
+static int action_ok_hakswitch_back(const char *path,
+      const char *label, unsigned type, size_t idx, size_t entry_idx)
+{
+   return action_cancel_pop_default(path, label, type, idx);
+}
+
+/* HAKSWITCH TEST: "Opções do Hakswitch" entry in the root menu - pushes the
+ * 3-toggle screen (DISPLAYLIST_HAKSWITCH_OPTIONS, menu_displaylist.c), same
+ * mechanism as the root menu's own "Opções do Retroarch"/Settings push. */
+static int action_ok_hakswitch_options(const char *path,
+      const char *label, unsigned type, size_t idx, size_t entry_idx)
+{
+   generic_action_ok_displaylist_push(
+         NULL, NULL, NULL, 0, 0, 0,
+         ACTION_OK_DL_HAKSWITCH_OPTIONS);
+   return 0;
+}
+
+/* HAKSWITCH TEST: rewrites the CURRENTLY SELECTED row's own display text
+ * in place (the "path" field - confusingly named, but that's what
+ * ozone_draw_hakswitch_quick_menu actually renders as the row label, see
+ * its entry.rich_label/entry.path fallback) instead of asking the generic
+ * menu system to rebuild the whole list via MENU_ST_FLAG_ENTRIES_NEED_REFRESH.
+ * That flag's rebuild path (menu_driver_displaylist_push, menu_driver.c)
+ * re-derives which displaylist to rebuild from the breadcrumb entry this
+ * screen was pushed with (ACTION_OK_DL_HAKSWITCH_OPTIONS in
+ * generic_action_ok_displaylist_push, menu_cbs_ok.c below) - that
+ * breadcrumb reuses MENU_ENUM_LABEL_CONTENT_SETTINGS (same as the root
+ * menu's own push), so a refresh from in here was resolving to the ROOT
+ * MENU's content instead of this screen's own - looked exactly like
+ * toggling silently "exited" to a different menu. Editing the row's text
+ * directly sidesteps that whole fragile path - nothing needs to be
+ * rebuilt for a change this small. menu_st->selection_ptr is reliable
+ * here specifically because action_ok/action_left/action_right are only
+ * ever invoked on the entry currently selected. */
+static void hakswitch_update_toggle_row_text(const char *prefix, bool enabled)
+{
+   struct menu_state *menu_st = menu_state_get_ptr();
+   file_list_t *list = MENU_LIST_GET_SELECTION(menu_st->entries.list, 0);
+   char new_text[64];
+
+   if (!list || menu_st->selection_ptr >= list->size)
+      return;
+
+   snprintf(new_text, sizeof(new_text), "%s: %s", prefix,
+         enabled ? "Ligado" : "Desligado");
+
+   if (list->list[menu_st->selection_ptr].path)
+      free(list->list[menu_st->selection_ptr].path);
+   list->list[menu_st->selection_ptr].path = strdup(new_text);
+}
+
+/* HAKSWITCH TEST: the 3 toggle rows inside "Opções do Hakswitch" all follow
+ * the same shape - flip the bool, persist it immediately (so a crash or a
+ * HOME-button exit right after toggling doesn't silently lose it), update
+ * this row's own text in place, and play a cue. Not static - LEFT/RIGHT
+ * also toggle the same way (direction is meaningless for a plain on/off),
+ * bound in menu_cbs_left.c/menu_cbs_right.c, which call these directly
+ * instead of duplicating the logic. */
+void hakswitch_toggle_music(void)
+{
+   hakswitch_setting_music_enabled = !hakswitch_setting_music_enabled;
+   hakswitch_save_settings();
+
+   audio_driver_mixer_play_menu_sound(AUDIO_MIXER_SYSTEM_SLOT_OK);
+   hakswitch_update_toggle_row_text("Música de fundo", hakswitch_setting_music_enabled);
+}
+
+void hakswitch_toggle_bg(void)
+{
+   hakswitch_setting_bg_enabled = !hakswitch_setting_bg_enabled;
+   hakswitch_save_settings();
+
+   audio_driver_mixer_play_menu_sound(AUDIO_MIXER_SYSTEM_SLOT_OK);
+   hakswitch_update_toggle_row_text("Imagens de fundo", hakswitch_setting_bg_enabled);
+}
+
+void hakswitch_toggle_covers(void)
+{
+   hakswitch_setting_covers_enabled = !hakswitch_setting_covers_enabled;
+   hakswitch_save_settings();
+
+   audio_driver_mixer_play_menu_sound(AUDIO_MIXER_SYSTEM_SLOT_OK);
+   hakswitch_update_toggle_row_text("Capas dos jogos", hakswitch_setting_covers_enabled);
+}
+
+static int action_ok_hakswitch_toggle_music(const char *path,
+      const char *label, unsigned type, size_t idx, size_t entry_idx)
+{
+   hakswitch_toggle_music();
+   return 0;
+}
+
+static int action_ok_hakswitch_toggle_bg(const char *path,
+      const char *label, unsigned type, size_t idx, size_t entry_idx)
+{
+   hakswitch_toggle_bg();
+   return 0;
+}
+
+static int action_ok_hakswitch_toggle_covers(const char *path,
+      const char *label, unsigned type, size_t idx, size_t entry_idx)
+{
+   hakswitch_toggle_covers();
+   return 0;
+}
 
 /* HAKSWITCH TEST: each console folder under hakswitch_root_path has
  * fixed "roms"/"logo"/"background" subfolders (not browsable menu
@@ -2129,6 +2266,21 @@ int generic_action_ok_displaylist_push(
                MENU_ENUM_LABEL_CONTENT_SETTINGS,
                0, 0, 0, NULL);
          dl_type            = DISPLAYLIST_CONTENT_SETTINGS;
+         break;
+      case ACTION_OK_DL_HAKSWITCH_OPTIONS:
+         /* HAKSWITCH TEST: "Opções do Hakswitch" screen, pushed by the OK
+          * handler on that root-menu entry (action_ok_hakswitch_options,
+          * menu_cbs_ok.c below). Same push mechanism as
+          * ACTION_OK_DL_CONTENT_SETTINGS just above - proven safe against
+          * the stack "loop" bug - just a different target displaylist. */
+         info.list          = MENU_LIST_GET_SELECTION(menu_list, 0);
+         info_path          = "Opções do Hakswitch";
+         info_label         = msg_hash_to_str(MENU_ENUM_LABEL_CONTENT_SETTINGS);
+         info.enum_idx      = MENU_ENUM_LABEL_CONTENT_SETTINGS;
+         menu_entries_append(menu_stack, info_path, info_label,
+               MENU_ENUM_LABEL_CONTENT_SETTINGS,
+               0, 0, 0, NULL);
+         dl_type            = DISPLAYLIST_HAKSWITCH_OPTIONS;
          break;
    }
 
@@ -10556,6 +10708,36 @@ int menu_cbs_init_bind_ok(menu_file_list_cbs_t *cbs,
    if (string_is_equal(label, "hakswitch_file"))
    {
       BIND_ACTION_OK(cbs, action_ok_hakswitch_open_file);
+      return 0;
+   }
+   if (string_is_equal(label, "hakswitch_quit"))
+   {
+      BIND_ACTION_OK(cbs, action_ok_hakswitch_quit);
+      return 0;
+   }
+   if (string_is_equal(label, "hakswitch_back"))
+   {
+      BIND_ACTION_OK(cbs, action_ok_hakswitch_back);
+      return 0;
+   }
+   if (string_is_equal(label, "hakswitch_options"))
+   {
+      BIND_ACTION_OK(cbs, action_ok_hakswitch_options);
+      return 0;
+   }
+   if (string_is_equal(label, "hakswitch_toggle_music"))
+   {
+      BIND_ACTION_OK(cbs, action_ok_hakswitch_toggle_music);
+      return 0;
+   }
+   if (string_is_equal(label, "hakswitch_toggle_bg"))
+   {
+      BIND_ACTION_OK(cbs, action_ok_hakswitch_toggle_bg);
+      return 0;
+   }
+   if (string_is_equal(label, "hakswitch_toggle_covers"))
+   {
+      BIND_ACTION_OK(cbs, action_ok_hakswitch_toggle_covers);
       return 0;
    }
 

@@ -285,6 +285,23 @@ function App(): React.JSX.Element {
     setIsBuilding(false)
   }
 
+  // Segunda opção de exportação, ao lado da já existente - mesmo banco de
+  // jogos, saída na estrutura de pastas que o TICO (outro frontend homebrew
+  // de Switch) espera em vez da do hakswitch. Ver buildTicoLibrary em
+  // build-service.ts pro que exatamente sai (só roms/ e assets/covers/,
+  // nunca config/data/cores/system do TICO).
+  const generateTicoLibrary = async (): Promise<void> => {
+    setIsBuilding(true)
+    setBuildError(null)
+    try {
+      const result = await window.api.build.generateTico()
+      if (result) setBuildResult(result)
+    } catch (error) {
+      setBuildError(error instanceof Error ? error.message : String(error))
+    }
+    setIsBuilding(false)
+  }
+
   const handleRowClick = (
     game: Game,
     index: number,
@@ -781,7 +798,10 @@ function App(): React.JSX.Element {
             Buscar metadados pendentes
           </button>
           <button disabled={isBuilding} onClick={generateLibrary} className="btn-primary">
-            Gerar Biblioteca
+            Gerar Biblioteca do HakSwitch
+          </button>
+          <button disabled={isBuilding} onClick={generateTicoLibrary} className="btn-secondary">
+            Gerar Biblioteca do TICO
           </button>
         </div>
       </footer>

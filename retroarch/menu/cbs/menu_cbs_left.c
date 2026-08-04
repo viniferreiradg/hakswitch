@@ -53,6 +53,29 @@
 #define BIND_ACTION_LEFT(cbs, name) (cbs)->action_left = (name)
 #endif
 
+/* HAKSWITCH TEST: shared toggle logic (flip bool, persist, update this
+ * row's own text in place) lives in menu_cbs_ok.c - LEFT just triggers
+ * the same toggle OK does, direction is meaningless for a plain on/off. */
+extern void hakswitch_toggle_music(void);
+extern void hakswitch_toggle_bg(void);
+extern void hakswitch_toggle_covers(void);
+
+static int action_left_hakswitch_toggle_music(unsigned type, const char *label, bool wraparound)
+{
+   hakswitch_toggle_music();
+   return 0;
+}
+static int action_left_hakswitch_toggle_bg(unsigned type, const char *label, bool wraparound)
+{
+   hakswitch_toggle_bg();
+   return 0;
+}
+static int action_left_hakswitch_toggle_covers(unsigned type, const char *label, bool wraparound)
+{
+   hakswitch_toggle_covers();
+   return 0;
+}
+
 /* Forward declarations */
 int action_ok_core_lock(const char *path, const char *label, unsigned type, size_t idx, size_t entry_idx);
 int action_ok_core_set_standalone_exempt(const char *path, const char *label, unsigned type, size_t idx, size_t entry_idx);
@@ -1445,6 +1468,24 @@ int menu_cbs_init_bind_left(menu_file_list_cbs_t *cbs,
 {
    if (!cbs)
       return -1;
+
+   /* HAKSWITCH TEST: intercept our own toggle rows before the stock
+    * label/type dispatch below, which has no idea about them. */
+   if (string_is_equal(label, "hakswitch_toggle_music"))
+   {
+      BIND_ACTION_LEFT(cbs, action_left_hakswitch_toggle_music);
+      return 0;
+   }
+   if (string_is_equal(label, "hakswitch_toggle_bg"))
+   {
+      BIND_ACTION_LEFT(cbs, action_left_hakswitch_toggle_bg);
+      return 0;
+   }
+   if (string_is_equal(label, "hakswitch_toggle_covers"))
+   {
+      BIND_ACTION_LEFT(cbs, action_left_hakswitch_toggle_covers);
+      return 0;
+   }
 
    BIND_ACTION_LEFT(cbs, bind_left_generic);
 

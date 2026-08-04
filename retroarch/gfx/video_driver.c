@@ -4911,7 +4911,7 @@ void video_driver_frame(const void *data, unsigned width,
           * card is immediately visible instead of silently retesting
           * old code (see the session-long log/path mixups this was
           * added to stop). */
-#define HAKSWITCH_BUILD_VERSION "V1.0.00005"
+#define HAKSWITCH_BUILD_VERSION "V1.0.00014"
          _len += strlcpy(status_text + _len, " || " HAKSWITCH_BUILD_VERSION,
                sizeof(status_text) - _len);
       }

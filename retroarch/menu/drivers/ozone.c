@@ -5893,6 +5893,11 @@ extern bool hakswitch_is_launch_pending(void);
  * above. Pumped once per frame here too. */
 extern void hakswitch_ensure_bgm_playing(void);
 extern void hakswitch_stop_bgm(void);
+/* "Opções do Hakswitch" toggles - menu_displaylist.c owns the globals and
+ * their persistence (hakswitch_load_settings/hakswitch_save_settings). */
+extern bool hakswitch_setting_music_enabled;
+extern bool hakswitch_setting_bg_enabled;
+extern bool hakswitch_setting_covers_enabled;
 
 /* Pulses the selected card ~+3% and back the instant a game is
  * launched - visual "confirm" cue that pairs with the launch sound
@@ -5967,6 +5972,30 @@ typedef struct
 static hakswitch_console_asset_t hakswitch_console_assets[8];
 static int hakswitch_console_asset_count = 0;
 
+/* HAKSWITCH TEST: boot-time preload splash. Every "Close Content" return
+ * (and every cold boot) starts hakswitch_console_assets empty - real
+ * hardware logs showed backgrounds alone cost ~62-64ms of GPU upload each
+ * (1920x1080, 8 consoles), which the per-frame async queue now spreads out
+ * safely but still shows as textures popping in one at a time while the
+ * user is already looking at the carousel. Instead: eagerly request every
+ * console's assets up front, show a loading spinner + "press any button"
+ * gate until they're all in, THEN reveal the carousel - by then nothing
+ * left to pop in. hakswitch_boot_preload_pending counts async loads
+ * actually kicked off (task_push_image_load calls) - incremented in
+ * hakswitch_get_console_assets right before each call, decremented
+ * unconditionally at the top of the matching upload callback. A slot with
+ * no logo/background file never increments it in the first place, so the
+ * splash can't get stuck waiting on art that doesn't exist. */
+typedef enum
+{
+   HAKSWITCH_BOOT_PRELOADING = 0,
+   HAKSWITCH_BOOT_WAIT_INPUT,
+   HAKSWITCH_BOOT_READY
+} hakswitch_boot_phase_t;
+
+static hakswitch_boot_phase_t hakswitch_boot_phase          = HAKSWITCH_BOOT_PRELOADING;
+static int                    hakswitch_boot_preload_pending = 0;
+
 /* Forward declaration - hakswitch_queue_upload is defined further down
  * with the game cover/screenshot upload machinery it was originally
  * built for, but the console logo/background callbacks just below need
@@ -6003,6 +6032,13 @@ static void hakswitch_console_logo_upload_cb(retro_task_t *task,
    struct texture_image *img     = (struct texture_image*)task_data;
    hakswitch_console_asset_t *slot = (hakswitch_console_asset_t*)user_data;
 
+   /* Unconditional - matches the unconditional increment right before the
+    * task_push_image_load call that leads here (see
+    * hakswitch_get_console_assets), whether or not a usable image came
+    * back. This is what lets the boot splash know every requested decode
+    * has resolved, not just the successful ones. */
+   hakswitch_boot_preload_pending--;
+
    if (slot && img && img->width > 0 && img->height > 0)
       hakswitch_queue_upload(img, &slot->logo_tex, &slot->logo_w, &slot->logo_h);
 }
@@ -6012,6 +6048,8 @@ static void hakswitch_console_bg_upload_cb(retro_task_t *task,
 {
    struct texture_image *img     = (struct texture_image*)task_data;
    hakswitch_console_asset_t *slot = (hakswitch_console_asset_t*)user_data;
+
+   hakswitch_boot_preload_pending--;
 
    if (slot && img && img->width > 0 && img->height > 0)
       hakswitch_queue_upload(img, &slot->bg_tex, &slot->bg_w, &slot->bg_h);
@@ -6055,6 +6093,7 @@ static hakswitch_console_asset_t *hakswitch_get_console_assets(const char *conso
          if (files->size > 0)
          {
 #if !defined(HAKSWITCH_DIAG_NO_IMAGES)
+            hakswitch_boot_preload_pending++;
             task_push_image_load(files->elems[0].data,
                   (video_driver_get_disp_flags() & VIDEO_FLAG_USE_RGBA), 0, 0,
                   hakswitch_console_logo_upload_cb, slot);
@@ -6069,6 +6108,7 @@ static hakswitch_console_asset_t *hakswitch_get_console_assets(const char *conso
          if (files->size > 0)
          {
 #if !defined(HAKSWITCH_DIAG_NO_IMAGES)
+            hakswitch_boot_preload_pending++;
             task_push_image_load(files->elems[0].data,
                   (video_driver_get_disp_flags() & VIDEO_FLAG_USE_RGBA), 0, 0,
                   hakswitch_console_bg_upload_cb, slot);
@@ -6079,6 +6119,28 @@ static hakswitch_console_asset_t *hakswitch_get_console_assets(const char *conso
    }
 
    return slot;
+}
+
+/* HAKSWITCH TEST: kicks off hakswitch_get_console_assets for every console
+ * up front instead of waiting for the carousel to scroll each one into
+ * view - see the boot-splash comment at hakswitch_boot_phase's declaration
+ * for why. Called once (guarded by hakswitch_boot_preload_started, checked
+ * by the caller in ozone_frame) as soon as the console-root list exists. */
+static void hakswitch_boot_preload_all_consoles(void)
+{
+   struct string_list *consoles = dir_list_new(
+         hakswitch_root_path, NULL, true, false, false, false);
+
+   if (consoles)
+   {
+      unsigned i;
+
+      for (i = 0; i < consoles->size; i++)
+         if (consoles->elems[i].attr.i == RARCH_DIRECTORY)
+            hakswitch_get_console_assets(path_basename(consoles->elems[i].data));
+
+      dir_list_free(consoles);
+   }
 }
 
 /* "Cover" fit (may crop, never distorts) - used for full-screen
@@ -6655,6 +6717,8 @@ typedef struct
 
 static hakswitch_hud_icon_t hakswitch_hud_left;
 static hakswitch_hud_icon_t hakswitch_hud_right;
+static hakswitch_hud_icon_t hakswitch_hud_up;
+static hakswitch_hud_icon_t hakswitch_hud_down;
 static hakswitch_hud_icon_t hakswitch_hud_a;
 static hakswitch_hud_icon_t hakswitch_hud_b;
 static hakswitch_hud_icon_t hakswitch_hud_x;
@@ -6717,11 +6781,16 @@ static bool hakswitch_list_is_ours(menu_list_t *menu_list)
        || string_is_equal(list->list[0].label, "hakswitch_file");
 }
 
-static void hakswitch_draw_hud_bar(ozone_handle_t *ozone, gfx_display_t *p_disp,
-      void *userdata, unsigned video_width, unsigned video_height, bool inside_console)
+/* HAKSWITCH TEST: shared layout/draw for a bottom hint bar - given a list
+ * of (icon(s) + label) hints, centers them left-to-right as one row.
+ * Factored out of the carousel's own hud bar so the root menu/"Opções do
+ * Hakswitch" screen (vertical lists, up/down instead of left/right) can
+ * reuse the exact same bar chrome and centering math with a different
+ * hint set, instead of a second copy-pasted implementation. */
+static void hakswitch_draw_hud_hints(ozone_handle_t *ozone, gfx_display_t *p_disp,
+      void *userdata, unsigned video_width, unsigned video_height,
+      hakswitch_hud_hint_t *hints, int n_hints)
 {
-   /* div: width 100%, background #000 @ 50% opacity, position fixed,
-    * bottom 0, padding 16px top/bottom. */
    int icon_size    = (int)(video_height * 0.0325f);
    int small_gap    = (int)(video_width  * 0.008f);
    int group_gap    = (int)(video_width  * 0.035f);
@@ -6733,9 +6802,7 @@ static void hakswitch_draw_hud_bar(ozone_handle_t *ozone, gfx_display_t *p_disp,
    static float hakswitch_hud_white[16]  = COLOR_HEX_TO_FLOAT(0xFFFFFF, 1.00f);
    static float hakswitch_hud_bg[16]     = COLOR_HEX_TO_FLOAT(0x0F0F0F, 0.75f);
    static float hakswitch_hud_border[16] = COLOR_HEX_TO_FLOAT(0xFFFFFF, 0.10f);
-   hakswitch_hud_hint_t hints[5];
    unsigned hint_label_w[5];
-   int n_hints = 0;
    int i, total_w, x, text_y;
 
    gfx_display_draw_quad(p_disp, userdata, video_width, video_height,
@@ -6744,31 +6811,6 @@ static void hakswitch_draw_hud_bar(ozone_handle_t *ozone, gfx_display_t *p_disp,
    gfx_display_draw_quad(p_disp, userdata, video_width, video_height,
          0, bar_y, video_width, 1, video_width, video_height,
          hakswitch_hud_border, NULL);
-
-   hakswitch_load_hud_icon(&hakswitch_hud_left,  "left.png");
-   hakswitch_load_hud_icon(&hakswitch_hud_right, "right.png");
-   hakswitch_load_hud_icon(&hakswitch_hud_a,     "button a.png");
-
-   hints[n_hints].icon1 = &hakswitch_hud_left;
-   hints[n_hints].icon2 = &hakswitch_hud_right;
-   hints[n_hints].label = "Navegar";
-   n_hints++;
-
-   hints[n_hints].icon1 = &hakswitch_hud_a;
-   hints[n_hints].icon2 = NULL;
-   hints[n_hints].label = "Selecionar";
-   n_hints++;
-
-   if (inside_console)
-   {
-      hakswitch_load_hud_icon(&hakswitch_hud_b, "button b.png");
-      hakswitch_load_hud_icon(&hakswitch_hud_x, "button x.png");
-      hakswitch_load_hud_icon(&hakswitch_hud_y, "button y.png");
-
-      hints[n_hints].icon1 = &hakswitch_hud_b; hints[n_hints].icon2 = NULL; hints[n_hints].label = "Voltar";    n_hints++;
-      hints[n_hints].icon1 = &hakswitch_hud_x; hints[n_hints].icon2 = NULL; hints[n_hints].label = "Detalhes";  n_hints++;
-      hints[n_hints].icon1 = &hakswitch_hud_y; hints[n_hints].icon2 = NULL; hints[n_hints].label = "Favoritar"; n_hints++;
-   }
 
    total_w = 0;
    for (i = 0; i < n_hints; i++)
@@ -6815,6 +6857,73 @@ static void hakswitch_draw_hud_bar(ozone_handle_t *ozone, gfx_display_t *p_disp,
    }
 }
 
+static void hakswitch_draw_hud_bar(ozone_handle_t *ozone, gfx_display_t *p_disp,
+      void *userdata, unsigned video_width, unsigned video_height, bool inside_console)
+{
+   hakswitch_hud_hint_t hints[5];
+   int n_hints = 0;
+
+   hakswitch_load_hud_icon(&hakswitch_hud_left,  "left.png");
+   hakswitch_load_hud_icon(&hakswitch_hud_right, "right.png");
+   hakswitch_load_hud_icon(&hakswitch_hud_a,     "button a.png");
+
+   hints[n_hints].icon1 = &hakswitch_hud_left;
+   hints[n_hints].icon2 = &hakswitch_hud_right;
+   hints[n_hints].label = "Navegar";
+   n_hints++;
+
+   hints[n_hints].icon1 = &hakswitch_hud_a;
+   hints[n_hints].icon2 = NULL;
+   hints[n_hints].label = "Selecionar";
+   n_hints++;
+
+   if (inside_console)
+   {
+      hakswitch_load_hud_icon(&hakswitch_hud_b, "button b.png");
+      hakswitch_load_hud_icon(&hakswitch_hud_x, "button x.png");
+      hakswitch_load_hud_icon(&hakswitch_hud_y, "button y.png");
+
+      hints[n_hints].icon1 = &hakswitch_hud_b; hints[n_hints].icon2 = NULL; hints[n_hints].label = "Voltar";    n_hints++;
+      hints[n_hints].icon1 = &hakswitch_hud_x; hints[n_hints].icon2 = NULL; hints[n_hints].label = "Detalhes";  n_hints++;
+      hints[n_hints].icon1 = &hakswitch_hud_y; hints[n_hints].icon2 = NULL; hints[n_hints].label = "Favoritar"; n_hints++;
+   }
+
+   hakswitch_draw_hud_hints(ozone, p_disp, userdata, video_width, video_height, hints, n_hints);
+}
+
+/* HAKSWITCH TEST: same bottom hint bar, for the root menu ("Voltar/Opções
+ * do Hakswitch/Opções do Retroarch/Sair") and the "Opções do Hakswitch"
+ * toggle screen - both vertical lists (up/down, not left/right like the
+ * horizontal carousel), always exactly 3 hints. */
+static void hakswitch_draw_menu_hud_bar(ozone_handle_t *ozone, gfx_display_t *p_disp,
+      void *userdata, unsigned video_width, unsigned video_height)
+{
+   hakswitch_hud_hint_t hints[3];
+   int n_hints = 0;
+
+   hakswitch_load_hud_icon(&hakswitch_hud_up,   "up.png");
+   hakswitch_load_hud_icon(&hakswitch_hud_down, "down.png");
+   hakswitch_load_hud_icon(&hakswitch_hud_b,    "button b.png");
+   hakswitch_load_hud_icon(&hakswitch_hud_a,    "button a.png");
+
+   hints[n_hints].icon1 = &hakswitch_hud_up;
+   hints[n_hints].icon2 = &hakswitch_hud_down;
+   hints[n_hints].label = "Navegar";
+   n_hints++;
+
+   hints[n_hints].icon1 = &hakswitch_hud_b;
+   hints[n_hints].icon2 = NULL;
+   hints[n_hints].label = "Voltar";
+   n_hints++;
+
+   hints[n_hints].icon1 = &hakswitch_hud_a;
+   hints[n_hints].icon2 = NULL;
+   hints[n_hints].label = "Selecionar";
+   n_hints++;
+
+   hakswitch_draw_hud_hints(ozone, p_disp, userdata, video_width, video_height, hints, n_hints);
+}
+
 /* HAKSWITCH TEST: custom Quick Menu overlay - replaces Ozone's own
  * sidebar+list chrome for our trimmed DISPLAYLIST_CONTENT_SETTINGS
  * (see menu_displaylist.c) with a small discreet box in the top-left
@@ -6829,30 +6938,44 @@ static void ozone_draw_hakswitch_quick_menu(
       unsigned video_width,
       unsigned video_height,
       unsigned selection,
-      file_list_t *selection_buf)
+      file_list_t *selection_buf,
+      bool is_centered_menu)
 {
-   static float hakswitch_qm_dim[16]       = COLOR_HEX_TO_FLOAT(0x000000, 0.45f);
+   /* HAKSWITCH TEST: the in-game Quick Menu (+/-) dims the paused game
+    * frame that's already sitting there and keeps its box tucked in
+    * the corner, out of the way of the game. The root menu (B at the
+    * console-list root) and the "Opções do Hakswitch" screen pushed from
+    * it both have no paused frame behind them to show through - the
+    * carousel itself isn't drawn once either list is pushed - so they
+    * dim to the carousel's own purple instead of black (closer in spirit
+    * to "showing what was there", short of actually redrawing the
+    * carousel behind it, which isn't cheap to do from here - the
+    * carousel's loaded art is owned by the console-list entries that got
+    * replaced when this list was pushed) and center the box, since
+    * there's no gameplay to stay out of the way of. */
+   static float hakswitch_qm_dim[16]        = COLOR_HEX_TO_FLOAT(0x000000, 0.45f);
+   static float hakswitch_qm_dim_root[16]   = COLOR_HEX_TO_FLOAT(0x1b0f3a, 0.50f);
    static float hakswitch_qm_box_bg[16]    = COLOR_HEX_TO_FLOAT(0x1b0f3a, 0.92f);
    static float hakswitch_qm_border[16]    = COLOR_HEX_TO_FLOAT(0x6CC6FF, 1.00f);
    static float hakswitch_qm_highlight[16] = COLOR_HEX_TO_FLOAT(0x6CC6FF, 0.92f);
    size_t entries_count = selection_buf ? selection_buf->size : 0;
    int    pad           = (int)(video_height * 0.018f);
    int    row_h         = (int)(video_height * 0.052f);
-   int    box_x         = (int)(video_width  * 0.032f);
-   int    box_y         = (int)(video_height * 0.045f);
-   int    box_w         = (int)(video_width  * 0.20f);
+   int    box_w         = (int)(video_width  * (is_centered_menu ? 0.30f : 0.20f));
    int    box_h         = pad * 2 + row_h * (int)entries_count;
+   int    box_x         = is_centered_menu
+         ? (int)((video_width  - box_w) / 2)
+         : (int)(video_width  * 0.032f);
+   int    box_y         = is_centered_menu
+         ? (int)((video_height - box_h) / 2)
+         : (int)(video_height * 0.045f);
    int    border_px     = MAX(2, (int)(video_height * 0.0022f));
    size_t i;
 
-   /* Dims the paused game frame that's already the background quad
-    * drawn earlier in ozone_frame - see the hakswitch background-color
-    * gating there, which only forces the carousel's own solid purple
-    * on the Main Menu tab and leaves the real (dimmable) frame alone
-    * everywhere else, including here. */
    gfx_display_draw_quad(p_disp, userdata, video_width, video_height,
          0, 0, video_width, video_height,
-         video_width, video_height, hakswitch_qm_dim, NULL);
+         video_width, video_height,
+         is_centered_menu ? hakswitch_qm_dim_root : hakswitch_qm_dim, NULL);
 
    gfx_display_draw_quad(p_disp, userdata, video_width, video_height,
          box_x, box_y, box_w, box_h,
@@ -6888,6 +7011,12 @@ static void ozone_draw_hakswitch_quick_menu(
             1.0f,
             false, 1.0f, false);
    }
+
+   /* HAKSWITCH TEST: button hints only for our own centered menus (root
+    * menu / "Opções do Hakswitch") - the in-game Quick Menu already had
+    * no hint bar before this and isn't part of what was asked for here. */
+   if (is_centered_menu)
+      hakswitch_draw_menu_hud_bar(ozone, p_disp, userdata, video_width, video_height);
 }
 
 /* HAKSWITCH TEST: infinite horizontal carousel, centered on screen.
@@ -7061,7 +7190,7 @@ static void ozone_draw_hakswitch_carousel(
 
       assets = hakswitch_get_console_assets(sel_label);
 
-      if (assets && assets->bg_tex)
+      if (assets && assets->bg_tex && hakswitch_setting_bg_enabled)
       {
          gfx_display_set_alpha(hakswitch_art_white, hakswitch_art_fade);
          hakswitch_draw_texture_cover(p_disp, userdata, video_width, video_height,
@@ -7071,11 +7200,12 @@ static void ozone_draw_hakswitch_carousel(
    else
    {
       /* Inside a console's game list: same console's background, but
-       * dimmed (black backdrop + background drawn at 70% opacity over
-       * it) so it reads as atmosphere rather than the main focus, plus
-       * the console's logo up top as a "you are here" marker. */
+       * dimmed (black backdrop + background drawn at 10% opacity over
+       * it) so it barely reads as atmosphere, well out of the way of the
+       * game covers - plus the console's logo up top as a "you are here"
+       * marker. */
       static float hakswitch_dim_black[16]  = COLOR_HEX_TO_FLOAT(0x000000, 1.00f);
-      static float hakswitch_bg_dimmed[16]  = COLOR_HEX_TO_FLOAT(0xFFFFFF, 0.70f);
+      static float hakswitch_bg_dimmed[16]  = COLOR_HEX_TO_FLOAT(0xFFFFFF, 0.10f);
       static float hakswitch_art_white[16]  = COLOR_HEX_TO_FLOAT(0xFFFFFF, 1.00f);
       char console_dir[1024];
       hakswitch_console_asset_t *assets;
@@ -7099,9 +7229,9 @@ static void ozone_draw_hakswitch_carousel(
                0, 0, video_width, video_height, video_width, video_height,
                hakswitch_dim_black, NULL);
 
-         if (assets->bg_tex)
+         if (assets->bg_tex && hakswitch_setting_bg_enabled)
          {
-            gfx_display_set_alpha(hakswitch_bg_dimmed, 0.70f * hakswitch_art_fade);
+            gfx_display_set_alpha(hakswitch_bg_dimmed, 0.10f * hakswitch_art_fade);
             hakswitch_draw_texture_cover(p_disp, userdata, video_width, video_height,
                   assets->bg_tex, assets->bg_w, assets->bg_h, hakswitch_bg_dimmed);
          }
@@ -7176,8 +7306,13 @@ static void ozone_draw_hakswitch_carousel(
       {
          /* label is the bare ROM filename here, and hakswitch_current_path
           * is the console's "roms" folder - hakswitch_get_game_cover looks
-          * for a same-named file in the sibling "capas" folder. */
-         hakswitch_game_asset_t *cover = hakswitch_get_game_cover(hakswitch_current_path, label);
+          * for a same-named file in the sibling "capas" folder. Skipped
+          * entirely when covers are disabled - every game just falls
+          * through to the generic placeholder below, same as a game with
+          * no matching cover file already does. */
+         hakswitch_game_asset_t *cover = hakswitch_setting_covers_enabled
+               ? hakswitch_get_game_cover(hakswitch_current_path, label)
+               : NULL;
          if (cover)
          {
             art_tex = cover->cover_tex;
@@ -10372,6 +10507,21 @@ static enum menu_action ozone_parse_menu_entry_action(
    file_list_t *selection_buf     = NULL;
    unsigned horizontal_list_size  = 0;
 
+   /* HAKSWITCH TEST: boot splash "press any button" gate - see
+    * hakswitch_boot_phase's declaration. Any real input action reaching
+    * here while WAIT_INPUT advances straight to READY and is swallowed
+    * (NOOP) so it doesn't also move the carousel selection or do whatever
+    * else that action normally means, the same frame the splash was still
+    * up. Checked before everything else in this function, including the
+    * MINUS-quit hotkey right below, so nothing else can react to input
+    * meant only to dismiss the splash. */
+   if (hakswitch_boot_phase == HAKSWITCH_BOOT_WAIT_INPUT
+         && action != MENU_ACTION_NOOP)
+   {
+      hakswitch_boot_phase = HAKSWITCH_BOOT_READY;
+      return MENU_ACTION_NOOP;
+   }
+
    /* HAKSWITCH TEST: dedicated quit hotkey (MINUS, which RetroArch's
     * input layer maps to MENU_ACTION_INFO by default). The B-button
     * quit further below only fires when a whole chain of state lines
@@ -10467,14 +10617,27 @@ static enum menu_action ozone_parse_menu_entry_action(
       }
       else if (!inside_console && action == MENU_ACTION_CANCEL)
       {
-         /* HAKSWITCH TEST: B at the true root (console list) quits
-          * straight away - no confirmation dialog yet (a prior attempt
+         /* HAKSWITCH TEST: B at the true root (console list) used to quit
+          * straight away - no confirmation dialog, because a prior attempt
           * using RetroArch's generic menu_dialog_confirm_set broke the
-          * console list rendering, cause not yet isolated; this direct
-          * command_event call is deliberately as small/isolated as
-          * possible to confirm the quit mechanism itself is fine before
-          * layering a confirmation prompt back on top). */
-         command_event(CMD_EVENT_QUIT, NULL);
+          * console list rendering (cause never isolated). Now pushes the
+          * same DISPLAYLIST_CONTENT_SETTINGS the in-game Quick Menu already
+          * uses (generic_action_ok_displaylist_push is already called
+          * directly elsewhere in this file, e.g. the playlist-manager push
+          * further down) - menu_displaylist.c's RARCH_CTL_IS_DUMMY_CORE
+          * branch of that case swaps in a 2-item "Configurações Gerais" /
+          * "Sair do HakSwitch" list instead of the in-game 5-item one. That
+          * 2-item list is itself the confirmation step this comment used to
+          * explain avoiding - "Sair do HakSwitch" quits directly too (see
+          * action_ok_hakswitch_quit, menu_cbs_ok.c), still sidestepping
+          * menu_dialog_confirm_set entirely. Pushing onto the real menu
+          * stack makes hakswitch_list_is_ours() false while this list is
+          * up, so B on it falls through to RetroArch's normal
+          * action_cancel_pop_default and pops back to the carousel exactly
+          * like leaving Settings from the in-game Quick Menu already does. */
+         generic_action_ok_displaylist_push(
+               NULL, NULL, NULL, 0, 0, 0,
+               ACTION_OK_DL_CONTENT_SETTINGS);
          action = MENU_ACTION_NOOP;
       }
 
@@ -14033,6 +14196,99 @@ static void ozone_messagebox_fadeout_cb(void *userdata)
    ozone->flags                 &= ~OZONE_FLAG_SHOULD_DRAW_MSGBOX;
 }
 
+/* HAKSWITCH TEST: draws the boot splash instead of the carousel while
+ * hakswitch_boot_phase != HAKSWITCH_BOOT_READY (see that enum's
+ * declaration for why this exists). Solid dark background the whole time;
+ * the existing spinning-dots loading indicator (same drawing as
+ * hakswitch_is_launch_pending's spinner, just centered instead of under a
+ * card) while consoles are still preloading, replaced by a "press any
+ * button" prompt once hakswitch_boot_preload_pending and the upload queue
+ * have both drained - see hakswitch_boot_advance_phase, called from
+ * ozone_frame every frame this is active. */
+static void hakswitch_draw_boot_splash(ozone_handle_t *ozone,
+      gfx_display_t *p_disp, void *userdata,
+      unsigned video_width, unsigned video_height)
+{
+   static float hakswitch_splash_bg[16] = COLOR_HEX_TO_FLOAT(0x000000, 1.00f);
+
+   gfx_display_draw_quad(p_disp, userdata, video_width, video_height,
+         0, 0, video_width, video_height,
+         video_width, video_height, hakswitch_splash_bg, NULL);
+
+   if (hakswitch_boot_phase == HAKSWITCH_BOOT_WAIT_INPUT)
+   {
+      gfx_display_draw_text(
+            ozone->fonts.entries_label.font,
+            "Aperte qualquer botão para continuar",
+            video_width / 2,
+            video_height / 2,
+            video_width,
+            video_height,
+            COLOR_TEXT_ALPHA(0xFFFFFFFF, 255),
+            TEXT_ALIGN_CENTER,
+            1.0f,
+            false,
+            1.0f,
+            false);
+      return;
+   }
+
+   {
+      int   spin_cx     = video_width / 2;
+      int   spin_cy     = video_height / 2;
+      int   spin_radius = (int)(video_height * 0.04f);
+      int   dot_size    = MAX(3, (int)(video_height * 0.012f));
+      int   num_dots    = 8;
+      float spin_angle  = (float)(fmod(
+            cpu_features_get_time_usec() / 1000000.0, 1.0)
+            * 2.0 * M_PI);
+      static float hakswitch_spin_color[16] = COLOR_HEX_TO_FLOAT(0xFFFFFF, 1.00f);
+      int   di;
+
+      for (di = 0; di < num_dots; di++)
+      {
+         float dot_angle = spin_angle
+               - (2.0f * (float)M_PI * di) / num_dots;
+         int   dot_x     = spin_cx
+               + (int)(cosf(dot_angle) * spin_radius) - dot_size / 2;
+         int   dot_y     = spin_cy
+               + (int)(sinf(dot_angle) * spin_radius) - dot_size / 2;
+         float dot_alpha = 1.0f - ((float)di / num_dots) * 0.85f;
+         float dot_color[16];
+
+         memcpy(dot_color, hakswitch_spin_color, sizeof(dot_color));
+         gfx_display_set_alpha(dot_color, dot_alpha);
+
+         gfx_display_draw_quad(p_disp, userdata, video_width, video_height,
+               dot_x, dot_y, dot_size, dot_size,
+               video_width, video_height, dot_color, NULL);
+      }
+   }
+}
+
+/* HAKSWITCH TEST: called once per frame while phase != READY (from
+ * ozone_frame, before it decides whether to draw the splash or the
+ * carousel). Moves PRELOADING -> WAIT_INPUT once every console asset
+ * request has both resolved (hakswitch_boot_preload_pending, decremented
+ * as each task_push_image_load callback fires) AND actually finished
+ * uploading to the GPU (the shared queue - hakswitch_pending_upload_count
+ * plus video_driver_texture_load_async_pending() - since queuing an
+ * upload and the video thread actually performing it are two different
+ * moments; checking only the pending-count would flip to WAIT_INPUT while
+ * the last texture is still mid-upload). WAIT_INPUT -> READY happens
+ * separately, from ozone_parse_menu_entry_action on the first real input
+ * action. */
+static void hakswitch_boot_advance_phase(void)
+{
+   if (hakswitch_boot_phase != HAKSWITCH_BOOT_PRELOADING)
+      return;
+
+   if (hakswitch_boot_preload_pending == 0
+         && hakswitch_pending_upload_count == 0
+         && !video_driver_texture_load_async_pending())
+      hakswitch_boot_phase = HAKSWITCH_BOOT_WAIT_INPUT;
+}
+
 static void ozone_frame(void *data, video_frame_info_t *video_info)
 {
    math_matrix_4x4 mymat;
@@ -14066,6 +14322,52 @@ static void ozone_frame(void *data, video_frame_info_t *video_info)
 
    if (!ozone)
       return;
+
+   /* HAKSWITCH TEST: boot splash gate - see hakswitch_boot_phase's
+    * declaration for the full reasoning. Kicks off preloading every
+    * console's art exactly once (dir_list_new(hakswitch_root_path) needs
+    * hakswitch_init_paths() to have already run, which it always has by
+    * the time any frame draws - DISPLAYLIST_MAIN_MENU builds before this
+    * ever gets called), then keeps drawing the splash in place of the
+    * carousel until hakswitch_boot_advance_phase (PRELOADING ->
+    * WAIT_INPUT) and ozone_parse_menu_entry_action's input check
+    * (WAIT_INPUT -> READY) let it through.
+    * hakswitch_process_pending_uploads() has to keep running every one of
+    * these frames too, or the very uploads this phase is waiting on would
+    * never drain - it's normally called much further down in this
+    * function, which this early return would otherwise skip.
+    *
+    * Gated on RARCH_CTL_IS_DUMMY_CORE (no content loaded - same check
+    * used elsewhere for "are we the frontend, not mid-game"): this
+    * splash exists to preload the CONSOLE CAROUSEL's art, which only
+    * ever shows in the frontend. A per-core .nro is its own separate
+    * process (see the two-binary build note) with this exact same
+    * static hakswitch_boot_preload_started/hakswitch_boot_phase state
+    * fresh at PRELOADING - and ozone_frame() only ever runs there the
+    * moment +/- opens the in-game Quick Menu (gameplay itself bypasses
+    * the menu driver entirely), so without this guard the very first
+    * Quick Menu open of a session hijacked into showing this splash
+    * (and uselessly preloading console art nobody's about to look at)
+    * instead of the Quick Menu itself. */
+   if (retroarch_ctl(RARCH_CTL_IS_DUMMY_CORE, NULL))
+   {
+      static bool hakswitch_boot_preload_started = false;
+
+      if (!hakswitch_boot_preload_started)
+      {
+         hakswitch_boot_preload_started = true;
+         hakswitch_boot_preload_all_consoles();
+      }
+
+      if (hakswitch_boot_phase != HAKSWITCH_BOOT_READY)
+      {
+         hakswitch_boot_advance_phase();
+         hakswitch_process_pending_uploads();
+         hakswitch_draw_boot_splash(ozone, p_disp, userdata,
+               video_width, video_height);
+         return;
+      }
+   }
 
    /* Snapshot context generation — if ozone_context_destroy()
     * runs on the main thread while we are mid-render on the
@@ -14284,6 +14586,7 @@ static void ozone_frame(void *data, video_frame_info_t *video_info)
     * stack_size <= 1, but that combination was confirmed on hardware
     * to go false after returning from a game even while this list is
     * still ours - see hakswitch_list_is_ours's comment. */
+   bool hakswitch_on_quick_menu = false;
    {
    bool hakswitch_on_main_menu = hakswitch_list_is_ours(menu_list);
 
@@ -14294,7 +14597,7 @@ static void ozone_frame(void *data, video_frame_info_t *video_info)
     * there's no stale flag to keep in sync across pushes/pops. Its
     * first entry is always MENU_ENUM_LABEL_RESUME_CONTENT by
     * construction, which nothing else in the app puts first. */
-   bool hakswitch_on_quick_menu = false;
+   bool hakswitch_on_centered_menu  = false;
    if (!hakswitch_on_main_menu && MENU_LIST_GET_STACK_SIZE(menu_list, 0) > 1)
    {
       file_list_t *hakswitch_qm_list = MENU_LIST_GET_SELECTION(menu_list, 0);
@@ -14304,6 +14607,24 @@ static void ozone_frame(void *data, video_frame_info_t *video_info)
                (menu_file_list_cbs_t*)hakswitch_qm_list->list[0].actiondata;
          if (hakswitch_qm_cbs && hakswitch_qm_cbs->enum_idx == MENU_ENUM_LABEL_RESUME_CONTENT)
             hakswitch_on_quick_menu = true;
+         /* HAKSWITCH TEST: same chrome-free treatment (plus the centered/
+          * wider/50%-dim variant, see is_centered_menu in
+          * ozone_draw_hakswitch_quick_menu) for BOTH of our other custom
+          * lists - the 4-item root menu ("Voltar / Opções do Hakswitch /
+          * Opções do Retroarch / Sair do HakSwitch", pushed by B at the
+          * console-list root) AND the "Opções do Hakswitch" toggle screen
+          * pushed from it (DISPLAYLIST_HAKSWITCH_OPTIONS, menu_displaylist.c)
+          * - both start with the same "Voltar" entry (label
+          * "hakswitch_back") as their first item, by construction, which
+          * nothing else in the app puts first, so one check catches both -
+          * they're meant to look identical anyway (centered, no gameplay
+          * behind either one to stay out of the way of), so there's no
+          * need to tell them apart here. */
+         else if (string_is_equal(hakswitch_qm_list->list[0].label, "hakswitch_back"))
+         {
+            hakswitch_on_quick_menu      = true;
+            hakswitch_on_centered_menu   = true;
+         }
       }
    }
 
@@ -14318,7 +14639,7 @@ static void ozone_frame(void *data, video_frame_info_t *video_info)
     * "not playing" as "pick a fresh random track", so coming back to
     * the carousel just starts a different song - a fine outcome for
     * ambient background music. */
-   if (hakswitch_on_main_menu)
+   if (hakswitch_on_main_menu && hakswitch_setting_music_enabled)
       hakswitch_ensure_bgm_playing();
    else
       hakswitch_stop_bgm();
@@ -14403,7 +14724,8 @@ static void ozone_frame(void *data, video_frame_info_t *video_info)
             video_width,
             video_height,
             (unsigned)ozone->selection,
-            MENU_LIST_GET_SELECTION(menu_list, 0));
+            MENU_LIST_GET_SELECTION(menu_list, 0),
+            hakswitch_on_centered_menu);
    else
       ozone_draw_entries(ozone, icons_tex,
             p_disp,
@@ -14441,7 +14763,15 @@ static void ozone_frame(void *data, video_frame_info_t *video_info)
    }
 
    /* Thumbnail bar */
+   /* HAKSWITCH TEST: ozone->show_thumbnail_bar is stock Ozone state,
+    * inherited from whatever list-type was showing before this Quick
+    * Menu list got pushed on top (our carousel counts as playlist-like
+    * to the stock logic) - it has no content to show here (we never
+    * populate playlist thumbnails), so it was rendering as a bare empty
+    * box. Gate it off for both Quick Menu variants (root and in-game),
+    * same as header/footer/sidebar just above. */
    if (     ozone->show_thumbnail_bar
+         && !hakswitch_on_quick_menu
          && !(ozone->flags2 & OZONE_FLAG2_SHOW_FULLSCREEN_THUMBNAILS))
       ozone_draw_thumbnail_bar(ozone,
             menu_st,

@@ -220,6 +220,15 @@ char hakswitch_current_path[1024] = "";
  * cleared after being consumed - see the comment at its match site. */
 char hakswitch_last_played_path[1024] = "";
 
+/* HAKSWITCH TEST: user-facing toggles from the "Opções do Hakswitch" screen
+ * (DISPLAYLIST_HAKSWITCH_OPTIONS below) - default true (current always-on
+ * behavior) so a fresh install with no settings file yet behaves exactly
+ * like before this feature existed. Read by ozone.c's draw code (music/
+ * background/cover gating) and by the toggle labels themselves. */
+bool hakswitch_setting_music_enabled  = true;
+bool hakswitch_setting_bg_enabled     = true;
+bool hakswitch_setting_covers_enabled = true;
+
 /* On Switch, launching a game re-execs into a completely separate
  * process (the selected core's own .nro - see
  * frontend/drivers/platform_switch.c), so in-memory globals like
@@ -294,6 +303,58 @@ static void hakswitch_load_last_played_state(void)
 
    fclose(f);
    remove(state_path);
+}
+
+/* HAKSWITCH TEST: persists the 3 "Opções do Hakswitch" toggles across
+ * restarts - unlike hakswitch_state.txt above (one-shot, deleted after
+ * read), this file is meant to survive indefinitely: read once at boot,
+ * rewritten every time a toggle changes (see the action_ok_hakswitch_
+ * toggle_* handlers in menu_cbs.c), never deleted. Fixed 3-line format,
+ * one "0"/"1" per line, same fixed order as the globals above (music, bg,
+ * covers) - no key names, so this deliberately doesn't try to be a real
+ * config format; if a 4th toggle is ever added, this format needs an
+ * explicit versioning scheme, not just appending a line. */
+static void hakswitch_load_settings(void)
+{
+   char settings_path[1024];
+   char line[64];
+   FILE *f;
+
+   fill_pathname_join_special(settings_path, hakswitch_base_path,
+         "hakswitch_settings.txt", sizeof(settings_path));
+
+   f = fopen(settings_path, "r");
+   if (!f)
+      return;
+
+   if (fgets(line, sizeof(line), f))
+      hakswitch_setting_music_enabled = (line[0] == '1');
+   if (fgets(line, sizeof(line), f))
+      hakswitch_setting_bg_enabled = (line[0] == '1');
+   if (fgets(line, sizeof(line), f))
+      hakswitch_setting_covers_enabled = (line[0] == '1');
+
+   fclose(f);
+}
+
+void hakswitch_save_settings(void)
+{
+   char settings_path[1024];
+   FILE *f;
+
+   fill_pathname_join_special(settings_path, hakswitch_base_path,
+         "hakswitch_settings.txt", sizeof(settings_path));
+
+   f = fopen(settings_path, "w");
+   if (!f)
+      return;
+
+   fprintf(f, "%d\n%d\n%d\n",
+         hakswitch_setting_music_enabled  ? 1 : 0,
+         hakswitch_setting_bg_enabled     ? 1 : 0,
+         hakswitch_setting_covers_enabled ? 1 : 0);
+
+   fclose(f);
 }
 
 /* Preloads launch.wav into the reserved user mixer slot (index 0 -
@@ -386,6 +447,7 @@ static void hakswitch_init_paths(void)
    strlcpy(hakswitch_current_path, hakswitch_root_path, sizeof(hakswitch_current_path));
 
    hakswitch_load_last_played_state();
+   hakswitch_load_settings();
 
    hakswitch_ensure_launch_sfx_loaded();
 }
@@ -8353,7 +8415,57 @@ unsigned menu_displaylist_build_list(
           * classic full settings screen RetroArch always had, not a
           * reimplementation. Always the save/load slot, so there's no
           * slot-picker entry to show - if a player wants more than one
-          * slot, that's what the full Settings screen is for. */
+          * slot, that's what the full Settings screen is for.
+          *
+          * Same displaylist, reused for a second entry point: B at the
+          * console-list root (ozone.c, ozone_parse_menu_entry_action)
+          * pushes this exact case too, now that there's no content
+          * loaded to Resume/Save/Load/Close - RARCH_CTL_IS_DUMMY_CORE
+          * (same check the MINUS-quit hotkey already uses) tells the two
+          * calling contexts apart and swaps in a 4-item list instead:
+          * "Voltar" (action_ok_hakswitch_back - just pops the list, same
+          * as B), "Opções do Hakswitch" (action_ok_hakswitch_options_placeholder
+          * - placeholder, destination not built yet), "Opções do
+          * Retroarch" (same MENU_ENUM_LABEL_SETTINGS push as below,
+          * unchanged - only the display string differs from the in-game
+          * Quick Menu's "Settings") and "Sair do HakSwitch" (custom
+          * "hakswitch_quit" label - see action_ok_hakswitch_quit in
+          * menu_cbs_ok.c - deliberately NOT the stock
+          * MENU_ENUM_LABEL_QUIT_RETROARCH/action_ok_quit, which shows a
+          * confirm dialog via menu_dialog_confirm_set when confirm_quit
+          * is on - the same mechanism an earlier attempt at a quit
+          * confirmation here already broke console-list rendering with). */
+         if (retroarch_ctl(RARCH_CTL_IS_DUMMY_CORE, NULL))
+         {
+            if (menu_entries_append(list,
+                     "Voltar",
+                     "hakswitch_back",
+                     MSG_UNKNOWN,
+                     MENU_SETTING_ACTION, 0, 0, NULL))
+               count++;
+
+            if (menu_entries_append(list,
+                     "Opções do Hakswitch",
+                     "hakswitch_options",
+                     MSG_UNKNOWN,
+                     MENU_SETTING_ACTION, 0, 0, NULL))
+               count++;
+
+            if (menu_entries_append(list,
+                     "Opções do Retroarch",
+                     msg_hash_to_str(MENU_ENUM_LABEL_SETTINGS),
+                     MENU_ENUM_LABEL_SETTINGS,
+                     MENU_SETTING_ACTION, 0, 0, NULL))
+               count++;
+
+            if (menu_entries_append(list,
+                     "Sair do HakSwitch",
+                     "hakswitch_quit",
+                     MSG_UNKNOWN,
+                     MENU_SETTING_ACTION, 0, 0, NULL))
+               count++;
+         }
+         else
          {
             settings->ints.state_slot = 0;
 
@@ -8403,6 +8515,57 @@ unsigned menu_displaylist_build_list(
                      MENU_ENUM_LABEL_NO_ITEMS,
                      MENU_SETTING_NO_ITEM, 0, 0, NULL))
                count++;
+         break;
+      case DISPLAYLIST_HAKSWITCH_OPTIONS:
+         /* HAKSWITCH TEST: "Opções do Hakswitch" screen (pushed from the
+          * root menu's "Opções do Hakswitch" entry - see
+          * action_ok_hakswitch_options in menu_cbs_ok.c). 3 toggles +
+          * Voltar. No real switch widget - the ON/OFF state is just part
+          * of each label string, rebuilt fresh every time this displaylist
+          * runs (including right after a toggle, via the
+          * MENU_ST_FLAG_ENTRIES_NEED_REFRESH the toggle handlers set), so
+          * the label always reflects hakswitch_setting_*_enabled as of
+          * right now - no separate "is this row stale" state to track. */
+         {
+            char label_music[64];
+            char label_bg[64];
+            char label_covers[64];
+
+            snprintf(label_music, sizeof(label_music), "Música de fundo: %s",
+                  hakswitch_setting_music_enabled ? "Ligado" : "Desligado");
+            snprintf(label_bg, sizeof(label_bg), "Imagens de fundo: %s",
+                  hakswitch_setting_bg_enabled ? "Ligado" : "Desligado");
+            snprintf(label_covers, sizeof(label_covers), "Capas dos jogos: %s",
+                  hakswitch_setting_covers_enabled ? "Ligado" : "Desligado");
+
+            if (menu_entries_append(list,
+                     "Voltar",
+                     "hakswitch_back",
+                     MSG_UNKNOWN,
+                     MENU_SETTING_ACTION, 0, 0, NULL))
+               count++;
+
+            if (menu_entries_append(list,
+                     label_music,
+                     "hakswitch_toggle_music",
+                     MSG_UNKNOWN,
+                     MENU_SETTING_ACTION, 0, 0, NULL))
+               count++;
+
+            if (menu_entries_append(list,
+                     label_bg,
+                     "hakswitch_toggle_bg",
+                     MSG_UNKNOWN,
+                     MENU_SETTING_ACTION, 0, 0, NULL))
+               count++;
+
+            if (menu_entries_append(list,
+                     label_covers,
+                     "hakswitch_toggle_covers",
+                     MSG_UNKNOWN,
+                     MENU_SETTING_ACTION, 0, 0, NULL))
+               count++;
+         }
          break;
       case DISPLAYLIST_BROWSE_URL_START:
 #ifdef HAVE_NETWORKING
@@ -15575,6 +15738,7 @@ bool menu_displaylist_ctl(enum menu_displaylist_ctl_state type,
          case DISPLAYLIST_AUDIO_MIXER_SETTINGS_LIST:
          case DISPLAYLIST_BROWSE_URL_START:
          case DISPLAYLIST_CONTENT_SETTINGS:
+         case DISPLAYLIST_HAKSWITCH_OPTIONS:
          case DISPLAYLIST_NETPLAY_ROOM_LIST:
          case DISPLAYLIST_SHADER_PRESET_MANAGER:
          case DISPLAYLIST_INPUT_RETROPAD_BINDS_LIST:

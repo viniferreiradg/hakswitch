@@ -25,30 +25,53 @@ async function processCoverImage(sourcePath: string, destPath: string): Promise<
     .toFile(destPath)
 }
 
-// Mesma ideia da capa (menos bytes = upload de textura mais rápido), mas SEM
-// redimensionar - logo/fundo são arte de tela cheia do console (não do jogo),
-// e um limite de altura como o da capa deixaria isso borrado. O ozone.c lê o
-// primeiro arquivo que achar em logo/ e background/ (dir_list_new sem filtro
-// de extensão), então o nome/extensão de saída não importa pra ele.
-const ART_WEBP_QUALITY = 85
+// Mesma ideia da capa (menos bytes = upload de textura mais rápido) - mas o
+// logo continua sem redimensionar (é pequeno, ~980x150-370, poucos ms de
+// upload mesmo em resolução cheia). O fundo (background) já foi flagrado no
+// log real de hardware como o gargalo que sobrou depois da splash de boot
+// (V1.0.00006): 1920x1080 puro custava ~62-64ms de upload cada, 8 consoles -
+// não é sobre tamanho de arquivo (o webp já ficava <100KB), é sobre
+// contagem de pixels decodificados indo pra GPU, que webp não reduz sozinho.
+// 720px de altura é a resolução nativa da tela do Switch em modo portátil -
+// como o fundo já leva gradiente/banda escura por cima (Fase 4), a perda de
+// nitidez tende a ser imperceptível, e o corte de ~2.25x nos pixels encurta
+// tanto o tempo de cada upload individual quanto a splash inteira. O
+// ozone.c lê o primeiro arquivo que achar em logo/ e background/
+// (dir_list_new sem filtro de extensão), então o nome/extensão de saída não
+// importa pra ele.
+const ART_WEBP_QUALITY      = 85
+const BACKGROUND_MAX_HEIGHT = 720
 
-async function processArtImage(sourcePath: string, destPath: string): Promise<void> {
-  if (extname(sourcePath).toLowerCase() === '.webp') {
+async function processArtImage(
+  sourcePath: string,
+  destPath: string,
+  artType: 'logo' | 'background'
+): Promise<void> {
+  if (artType === 'logo' && extname(sourcePath).toLowerCase() === '.webp') {
     copyFileSync(sourcePath, destPath)
     return
   }
-  await sharp(sourcePath).webp({ quality: ART_WEBP_QUALITY }).toFile(destPath)
+
+  const pipeline = sharp(sourcePath)
+  if (artType === 'background')
+    pipeline.resize({ height: BACKGROUND_MAX_HEIGHT, withoutEnlargement: true })
+
+  await pipeline.webp({ quality: ART_WEBP_QUALITY }).toFile(destPath)
 }
 
 // Converte cada imagem de uma pasta de arte (logo/ ou background/) pra webp,
 // preservando o nome sem a extensão original. Usada tanto pra pasta do
 // template (consoles montados à mão antes do Studio existir) quanto, se um
 // dia passar a ter mais de um arquivo lá, pro caminho escolhido no Studio.
-async function processArtDir(sourceDir: string, destDir: string): Promise<void> {
+async function processArtDir(
+  sourceDir: string,
+  destDir: string,
+  artType: 'logo' | 'background'
+): Promise<void> {
   for (const filename of readdirSync(sourceDir)) {
     const sourcePath = join(sourceDir, filename)
     const destPath = join(destDir, `${basename(filename, extname(filename))}.webp`)
-    await processArtImage(sourcePath, destPath)
+    await processArtImage(sourcePath, destPath, artType)
   }
 }
 
@@ -127,11 +150,11 @@ export async function buildLibrary(destParentDir: string): Promise<BuildResult> 
         const studioArt = platform?.[art]
         if (studioArt && existsSync(studioArt)) {
           const destPath = join(platformDir, art, `${basename(studioArt, extname(studioArt))}.webp`)
-          await processArtImage(studioArt, destPath)
+          await processArtImage(studioArt, destPath, art)
         } else if (templateFound) {
           const templateArt = join(TEMPLATE_DIR, 'consoles', game.platform_name, art)
           if (existsSync(templateArt))
-            await processArtDir(templateArt, join(platformDir, art))
+            await processArtDir(templateArt, join(platformDir, art), art)
         }
       }
 
@@ -162,4 +185,82 @@ export async function buildLibrary(destParentDir: string): Promise<BuildResult> 
   }
 
   return { included, missingFiles, templateFound, outputPath: destParentDir }
+}
+
+// TICO (outro frontend homebrew de Switch, mesma ideia de carrossel com
+// capa) usa uma estrutura de pastas parecida mas não igual - descoberta
+// analisando a pasta de dados de uma instalação real (2026-07-29):
+// roms/<slug>/<rom> direto (sem subpasta "roms" extra dentro do console,
+// diferente do consoles/<Nome>/roms/ do hakswitch) e
+// assets/covers/<slug>/<RomSemExt>.jpg (casado pelo nome do arquivo, mesmo
+// princípio das capas do hakswitch, só que em pasta/extensão diferentes).
+// Só os consoles que os dois projetos têm core em comum hoje entram aqui -
+// qualquer plataforma sem entrada é ignorada nesse modo (não é erro,
+// simplesmente não sai nada pra ela). Slugs confirmados na pasta de exemplo:
+// snes, genesis, master-system, gb, gbc, gba, n64. O slug do NES ("nes") é
+// um palpite - não havia uma pasta roms/nes populada na amostra pra
+// confirmar; ajustar aqui se o teste real mostrar outro nome.
+const TICO_PLATFORM_SLUGS: Record<string, string> = {
+  Nintendo: 'nes',
+  'Super Nintendo': 'snes',
+  'Mega Drive': 'genesis',
+  'Master System': 'master-system',
+  'Game Boy': 'gb',
+  'Game Boy Color': 'gbc',
+  'Game Boy Advance': 'gba',
+  'Nintendo 64': 'n64'
+}
+
+// Mesmo pipeline de redimensionar da capa do hakswitch (processCoverImage),
+// só que termina em JPEG - formato das capas encontradas na instalação real
+// do TICO. Ainda não confirmado se o TICO também aceita WEBP; até testar,
+// JPG é a aposta mais segura.
+async function processTicoCoverImage(sourcePath: string, destPath: string): Promise<void> {
+  await sharp(sourcePath)
+    .resize({ height: COVER_MAX_HEIGHT, withoutEnlargement: true })
+    .jpeg({ quality: COVER_WEBP_QUALITY })
+    .toFile(destPath)
+}
+
+// Gera SÓ roms/<slug>/ e assets/covers/<slug>/ dentro de destDir - nada
+// além disso. config/, data/, cores/*.nro e system/ (bios) são geridos pelo
+// próprio TICO (config/accounts.jsonc guarda credenciais reais de conta) e
+// nunca devem ser tocados/sobrescritos por aqui, ou uma instalação existente
+// do usuário seria destruída.
+export async function buildTicoLibrary(destDir: string): Promise<BuildResult> {
+  const romsDir = join(destDir, 'roms')
+  const coversDir = join(destDir, 'assets', 'covers')
+
+  let included = 0
+  let missingFiles = 0
+
+  for (const game of listGames()) {
+    const slug = TICO_PLATFORM_SLUGS[game.platform_name]
+    if (!slug) continue
+
+    if (!existsSync(game.filename)) {
+      missingFiles++
+      continue
+    }
+
+    const platformRomsDir = join(romsDir, slug)
+    const platformCoversDir = join(coversDir, slug)
+    mkdirSync(platformRomsDir, { recursive: true })
+    mkdirSync(platformCoversDir, { recursive: true })
+
+    const romBasename = basename(game.filename)
+    const romNoExt = basename(game.filename, extname(game.filename))
+
+    copyFileSync(game.filename, join(platformRomsDir, romBasename))
+
+    if (game.cover && existsSync(game.cover))
+      await processTicoCoverImage(game.cover, join(platformCoversDir, `${romNoExt}.jpg`))
+
+    included++
+  }
+
+  // templateFound não se aplica nesse modo (é específico do pacote
+  // switch/+retroarch/ do hakswitch) - true só pra não disparar o aviso
+  // "pasta do projeto HakSwitch não encontrada" na tela de sucesso.
+  return { included, missingFiles, templateFound: true, outputPath: destDir }
 }

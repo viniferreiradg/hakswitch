@@ -16,6 +16,8 @@ const EXTENSION_TO_PLATFORM: Record<string, string> = {
   '.smc': 'Super Nintendo',
   '.md': 'Mega Drive',
   '.gen': 'Mega Drive',
+  '.bin': 'Mega Drive',
+  '.smd': 'Mega Drive',
   '.sms': 'Master System',
   '.gb': 'Game Boy',
   '.gbc': 'Game Boy Color',
